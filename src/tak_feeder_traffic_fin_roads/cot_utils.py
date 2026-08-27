@@ -94,6 +94,118 @@ def _cot_type_for_announcement(
     return default_type
 
 
+def _generate_shape_cot(
+    candidate: Dict[str, Any],
+    cot_type_line: str,
+    cot_how: str,
+    mission_name: Optional[str],
+    argb: str,
+    centroid: Any,
+    geometry: Dict[str, Any],
+) -> Optional[bytes]:
+    """Generate shape-only CoT for polyline (u-d-f, no icon)."""
+    uid_base: str = candidate.get("uid", "unknown")
+    uid = f"{uid_base}.line"
+    remarks: str = candidate.get("remarks", "")
+    callsign: str = candidate.get("callsign", uid)
+    # Apply same Häiriö override as icon CoT so both share label
+    _default_caution = "6d781afb-89a6-4c07-b2b9-a89748b6a38f/Transport/caution.png"
+    _icon_preview = _icon_for_announcement(
+        candidate.get("announcementType", ""),
+        candidate.get("featuresStr", ""),
+        "6d781afb-89a6-4c07-b2b9-a89748b6a38f/Transport/caution.png",
+    )
+    if _icon_preview == _default_caution and callsign != "Nostotyö":
+        callsign = "Häiriö"
+
+    lat, lon = centroid  # type: ignore[misc]
+    gtype = geometry.get("type", "Point")
+    coords = geometry.get("coordinates", [])
+
+    end_dt = _parse_iso8601(candidate.get("endTime"))
+    start_dt = _parse_iso8601(candidate.get("startTime"))
+    now = datetime.now(timezone.utc)
+    if end_dt:
+        stale_dt = end_dt
+    elif start_dt:
+        stale_dt = start_dt + timedelta(hours=24)
+    else:
+        stale_dt = now + timedelta(hours=24)
+    start_for_cot = start_dt if start_dt else now
+
+    root = ET.Element("event")
+    root.set("version", "2.0")
+    root.set("type", cot_type_line)
+    root.set("uid", uid)
+    root.set("how", cot_how)
+    root.set("time", _cot_time_now())
+    root.set("start", _cot_time_from_dt(start_for_cot))
+    root.set("stale", _cot_time_from_dt(stale_dt))
+
+    pt_attr = {"lat": str(lat), "lon": str(lon), "hae": "0", "ce": "10", "le": "10"}
+    ET.SubElement(root, "point", attrib=pt_attr)
+    detail = ET.Element("detail")
+    if mission_name:
+        marti = ET.Element("marti")
+        dest = ET.Element("dest")
+        dest.set("mission", mission_name)
+        marti.append(dest)
+        detail.append(marti)
+    contact = ET.Element("contact")
+    contact.set("callsign", callsign)
+    detail.append(contact)
+    remarks_el = ET.Element("remarks")
+    remarks_el.text = remarks
+    detail.append(remarks_el)
+
+    # For shape we keep color for line (even though icon not present, color drives fill if needed)
+    color = ET.Element("color")
+    color.set("argb", argb)
+    detail.append(color)
+
+    # Shape with separate polylines (no link to avoid closing line)
+    lines: List[List[List[float]]] = []
+    if gtype == "LineString":
+        lines = [coords]  # type: ignore[assignment]
+    elif gtype == "MultiLineString":
+        lines = coords  # type: ignore[assignment]
+    total_pts = sum(len(line) for line in lines)
+    max_points = 200
+    decimated_lines: List[List[List[float]]] = []
+    for line in lines:
+        if total_pts > max_points and len(line) > 1:
+            keep = max(2, int(len(line) * max_points / total_pts))
+            if len(line) > keep:
+                step = len(line) / keep
+                line = [line[int(i * step)] for i in range(keep)]  # type: ignore[arg-type]
+        decimated_lines.append(line)  # type: ignore[arg-type]
+
+    shape = ET.Element("shape")
+    for line in decimated_lines:
+        polyline = ET.Element("polyline")
+        for lon_p, lat_p in line:  # type: ignore[misc]
+            vertex = ET.Element("vertex")
+            vertex.set("lat", str(lat_p))
+            vertex.set("lon", str(lon_p))
+            vertex.set("hae", "0")
+            polyline.append(vertex)
+        shape.append(polyline)
+    detail.append(shape)
+
+    stroke_color = ET.Element("strokeColor")
+    stroke_color.set("value", argb)
+    detail.append(stroke_color)
+    stroke_weight = ET.Element("strokeWeight")
+    stroke_weight.set("value", "3")
+    detail.append(stroke_weight)
+    stroke_style = ET.Element("strokeStyle")
+    stroke_style.set("value", "solid")
+    detail.append(stroke_style)
+
+    root.append(detail)
+    return ET.tostring(root)
+
+
 def generate_traffic_cot(
     candidate: Dict[str, Any],
     cot_type: str = "a-n-G",
@@ -135,21 +247,11 @@ def generate_traffic_cot(
 
     start_for_cot = start_dt if start_dt else now
 
-    # For polyline shapes try dedicated line type (u-d-f) so ATAK renders shape; accidents stay a-u-G
-    is_polyline_for_type = geometry.get("type", "Point") in (
-        "LineString",
-        "MultiLineString",
+    actual_cot_type = _cot_type_for_announcement(
+        candidate.get("announcementType", ""),
+        candidate.get("featuresStr", ""),
+        cot_type,
     )
-    if is_polyline_for_type and not _is_accident(
-        candidate.get("announcementType", ""), candidate.get("featuresStr", "")
-    ):
-        actual_cot_type = cot_type_line
-    else:
-        actual_cot_type = _cot_type_for_announcement(
-            candidate.get("announcementType", ""),
-            candidate.get("featuresStr", ""),
-            cot_type,
-        )
 
     # Override callsign to Häiriö for generic triangle (default caution), except Nostotyö stays
     _default_caution = "6d781afb-89a6-4c07-b2b9-a89748b6a38f/Transport/caution.png"
@@ -231,16 +333,17 @@ def generate_traffic_cot(
 
     is_polyline = gtype in ("LineString", "MultiLineString")
 
-    if is_polyline:
-        # Split into separate lines to avoid straight-line artifact
-        # MultiLineString concatenating into one polyline draws a line back to start
+    # For accidents keep shape in same CoT (a-u-G). For other polylines shape is split
+    # into separate CoT via _generate_shape_cot() so ATAK shows both icon (a-n-G) and line (u-d-f)
+    if is_polyline and _is_accident(
+        candidate.get("announcementType", ""), candidate.get("featuresStr", "")
+    ):
         lines: List[List[List[float]]] = []
         if gtype == "LineString":
             lines = [coords]  # type: ignore[assignment]
         elif gtype == "MultiLineString":
             lines = coords  # type: ignore[assignment]
 
-        # Decimate to keep total points <200, per line proportionally
         total_pts = sum(len(line) for line in lines)
         max_points = 200
         decimated_lines: List[List[List[float]]] = []

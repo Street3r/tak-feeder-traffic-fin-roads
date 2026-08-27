@@ -137,11 +137,21 @@ class TrafficMissionWorker:
                 async with aiohttp.ClientSession() as session:
                     fc = await digitraffic.fetch_geojson(session, self.url)
                 candidates = digitraffic.extract_cot_candidates(fc)
-                cap_uids = [c["uid"] for c in candidates]
+                # For polyline non-accidents we split into icon + line, so need both UIDs for diff
+                cap_uids: list[str] = []
+                for c in candidates:
+                    cap_uids.append(c["uid"])
+                    gtype = c.get("geometry", {}).get("type", "Point")
+                    is_acc = cot_utils._is_accident(  # type: ignore[attr-defined]
+                        c.get("announcementType", ""), c.get("featuresStr", "")
+                    )
+                    if gtype in ("LineString", "MultiLineString") and not is_acc:
+                        cap_uids.append(f"{c['uid']}.line")
                 logger.info(
-                    "Fetched %d features -> %d candidates",
+                    "Fetched %d features -> %d candidates (%d CoTs with split)",
                     len(fc.get("features", [])),
                     len(candidates),
+                    len(cap_uids),
                 )
             except (
                 aiohttp.ClientError,
@@ -188,20 +198,54 @@ class TrafficMissionWorker:
 
             logger.info(
                 "Changes detected, building mission package with %d CoTs...",
-                len(candidates),
+                len(cap_uids),
             )
             cot_files: Dict[str, bytes | str] = {}
             for cand in candidates:
-                cot_data = cot_utils.generate_traffic_cot(
-                    cand,
-                    cot_type=self.cot_type,
-                    cot_how=self.cot_how,
-                    mission_name=self.mission_name,
-                    iconset_path=self.iconset_path or None,
-                    cot_type_line=self.cot_type_line,
+                gtype = cand.get("geometry", {}).get("type", "Point")
+                is_acc = cot_utils._is_accident(  # type: ignore[attr-defined]
+                    cand.get("announcementType", ""), cand.get("featuresStr", "")
                 )
-                if cot_data:
-                    cot_files[cand["uid"]] = cot_data
+                is_poly = gtype in ("LineString", "MultiLineString")
+                if is_poly and not is_acc:
+                    # Split into icon (a-n-G) + shape (u-d-f) so ATAK shows both
+                    icon_cot = cot_utils.generate_traffic_cot(
+                        cand,
+                        cot_type=self.cot_type,
+                        cot_how=self.cot_how,
+                        mission_name=self.mission_name,
+                        iconset_path=self.iconset_path or None,
+                        cot_type_line=self.cot_type_line,
+                    )
+                    if icon_cot:
+                        cot_files[cand["uid"]] = icon_cot
+                    # Shape CoT (u-d-f, no icon, shape polyline)
+                    argb = cot_utils._color_for_announcement(  # type: ignore[attr-defined]
+                        cand.get("announcementType", ""), cand.get("featuresStr", "")
+                    )
+                    shape_cot = cot_utils._generate_shape_cot(  # type: ignore[attr-defined]
+                        cand,
+                        cot_type_line=self.cot_type_line,
+                        cot_how=self.cot_how,
+                        mission_name=self.mission_name,
+                        argb=argb,
+                        centroid=cand.get("centroid"),
+                        geometry=cand.get("geometry", {}),
+                    )
+                    if shape_cot:
+                        cot_files[f"{cand['uid']}.line"] = shape_cot
+                else:
+                    # Point or accident polyline (single CoT with icon+shape)
+                    cot_data = cot_utils.generate_traffic_cot(
+                        cand,
+                        cot_type=self.cot_type,
+                        cot_how=self.cot_how,
+                        mission_name=self.mission_name,
+                        iconset_path=self.iconset_path or None,
+                        cot_type_line=self.cot_type_line,
+                    )
+                    if cot_data:
+                        cot_files[cand["uid"]] = cot_data
 
             if not cot_files:
                 logger.info("No CoT files to upload (all filtered).")

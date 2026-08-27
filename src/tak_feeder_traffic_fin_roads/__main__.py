@@ -41,6 +41,7 @@ async def main() -> None:
     api_host = os.getenv("API_HOST", "")
     api_port = os.getenv("API_PORT", "8443")
     cot_type = os.getenv("COT_TYPE", "a-n-G")
+    cot_type_line = os.getenv("COT_TYPE_LINE", "u-d-f")
     cot_how = os.getenv("COT_HOW", "h-e")
     iconset_path = os.getenv(
         "ICONSET_PATH", "6d781afb-89a6-4c07-b2b9-a89748b6a38f/Transport/caution.png"
@@ -60,6 +61,7 @@ async def main() -> None:
         "API_HOST": api_host,
         "API_PORT": api_port,
         "COT_TYPE": cot_type,
+        "COT_TYPE_LINE": cot_type_line,
         "COT_HOW": cot_how,
         "ICONSET_PATH": iconset_path,
         "VERSION": "0.1.0",

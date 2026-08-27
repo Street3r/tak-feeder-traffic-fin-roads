@@ -49,6 +49,7 @@ class TrafficMissionWorker:
         self.url: str = config.get("DIGITRAFFIC_URL", digitraffic.DEFAULT_URL)
         self.poll_interval: int = int(config.get("UPDATE_INTERVAL", "60"))
         self.cot_type: str = config.get("COT_TYPE", "a-n-G")
+        self.cot_type_line: str = config.get("COT_TYPE_LINE", "u-d-f")
         self.cot_how: str = config.get("COT_HOW", "h-e")
         self.iconset_path: str = config.get("ICONSET_PATH", "")
         self.mission_name: str = config.get("MISSION_NAME", "TrafficFinRoads")
@@ -197,6 +198,7 @@ class TrafficMissionWorker:
                     cot_how=self.cot_how,
                     mission_name=self.mission_name,
                     iconset_path=self.iconset_path or None,
+                    cot_type_line=self.cot_type_line,
                 )
                 if cot_data:
                     cot_files[cand["uid"]] = cot_data

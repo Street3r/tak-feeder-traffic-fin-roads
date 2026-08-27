@@ -100,6 +100,7 @@ def generate_traffic_cot(
     cot_how: str = "h-e",
     mission_name: Optional[str] = None,
     iconset_path: Optional[str] = None,
+    cot_type_line: str = "u-d-f",
 ) -> Optional[bytes]:
     """
     Generate CoT XML for a single Digitraffic candidate.
@@ -134,11 +135,21 @@ def generate_traffic_cot(
 
     start_for_cot = start_dt if start_dt else now
 
-    actual_cot_type = _cot_type_for_announcement(
-        candidate.get("announcementType", ""),
-        candidate.get("featuresStr", ""),
-        cot_type,
+    # For polyline shapes try dedicated line type (u-d-f) so ATAK renders shape; accidents stay a-u-G
+    is_polyline_for_type = geometry.get("type", "Point") in (
+        "LineString",
+        "MultiLineString",
     )
+    if is_polyline_for_type and not _is_accident(
+        candidate.get("announcementType", ""), candidate.get("featuresStr", "")
+    ):
+        actual_cot_type = cot_type_line
+    else:
+        actual_cot_type = _cot_type_for_announcement(
+            candidate.get("announcementType", ""),
+            candidate.get("featuresStr", ""),
+            cot_type,
+        )
 
     # Override callsign to Häiriö for generic triangle (default caution), except Nostotyö stays
     _default_caution = "6d781afb-89a6-4c07-b2b9-a89748b6a38f/Transport/caution.png"

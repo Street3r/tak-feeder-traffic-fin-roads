@@ -23,7 +23,8 @@ All via environment variables / `.env`:
 | `MY_UID` | `roads.0001` | Feeder UID |
 | `DIGITRAFFIC_URL` | `https://tie.digitraffic.fi/api/traffic-message/v2/traffic-announcements` | Digitraffic GeoJSON endpoint |
 | `UPDATE_INTERVAL` | `60` | Poll interval seconds |
-| `COT_TYPE` | `a-n-G` | Base CoT type |
+| `COT_TYPE` | `a-n-G` | Base CoT type for point |
+| `COT_TYPE_LINE` | `u-d-f` | CoT type for polyline shape (try `u-d-f` so ATAK draws line; fallback split icon+shape if needed) |
 | `COT_HOW` | `h-e` | CoT how |
 | `ICONSET_PATH` | `6d781afb-89a6-4c07-b2b9-a89748b6a38f/Transport/caution.png` | ATAK usericon `iconsetpath` (warning triangle, default for unknown) |
 | `DEBUG` | `0` | Debug logging |

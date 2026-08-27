@@ -24,9 +24,12 @@ async def main() -> None:
     """Initialize and run the road traffic feeder."""
     load_dotenv()
 
-    cot_url = os.getenv("COT_URL")
-    if not cot_url or cot_url.lower() == "none":
-        cot_url = "ssl://takserver:8089"
+    cot_url_raw = os.getenv("COT_URL", "")
+    # COT_URL is optional when using Mission API (put package); keep empty to disable COT stream
+    if cot_url_raw and cot_url_raw.lower() != "none":
+        cot_url = cot_url_raw
+    else:
+        cot_url = ""
 
     cert = os.getenv("CLIENT_CERT")
     if not cert or cert.lower() == "none":
@@ -121,6 +124,29 @@ async def main() -> None:
                         return
             except Exception as exc:  # pylint: disable=broad-exception-caught
                 print(f"Mission setup failed: {exc}")
+
+    # If COT_URL is empty and we have mission API, run mission sync standalone (no COT stream)
+    use_cot = bool(cot_url)
+    if not use_cot and not api_host:
+        print("No COT_URL and no API_HOST configured — nothing to do. Exiting.")
+        if takserver is not None:
+            await takserver.close()
+        return
+
+    if not use_cot and api_host:
+        # Mission-only mode: no pytak COT stream, just run mission sync loop
+        print(f"Running in mission-only mode (no COT_URL) -> mission {mission_name}")
+        if config_dict.get("DEBUG") == "1":
+            logging.getLogger().setLevel(logging.DEBUG)
+        try:
+            # Dummy queue for QueueWorker base (not used for COT stream)
+            dummy_queue: asyncio.Queue[bytes] = asyncio.Queue()
+            worker = feeder_mod.TrafficMissionWorker(dummy_queue, config_dict)  # type: ignore[arg-type]
+            await worker.run()
+        finally:
+            if takserver is not None:
+                await takserver.close()
+        return
 
     config_parser = ConfigParser()
     config_parser["mycottool"] = config_dict

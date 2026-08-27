@@ -14,7 +14,7 @@ All via environment variables / `.env`:
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `COT_URL` | `ssl://takserver:8089` | TAK server COT URL (TLS) |
+| `COT_URL` | `` (empty) | TAK server COT URL (TLS) — optional when using Mission API `put` package only; leave empty/`none` to disable COT stream |
 | `CLIENT_CERT` |  | mTLS cert PEM path |
 | `CLIENT_KEY` |  | mTLS key PEM path |
 | `PYTAK_TLS_DONT_VERIFY` | `0` | Skip TLS verify |

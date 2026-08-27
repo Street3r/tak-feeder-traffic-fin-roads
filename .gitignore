@@ -1,0 +1,36 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+env/
+.env
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+todo.md
+TODO.md
+
+# Certificates / keys - always excluded
+certs/
+cert/
+*.pem
+*.key
+*.pfx
+*.p12
+*.crt
+*.csr
+
+# IDE / misc
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Digitraffic cache / ipynb
+.ipynb_checkpoints/
+*.ipynb

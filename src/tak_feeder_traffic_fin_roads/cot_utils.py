@@ -178,14 +178,16 @@ def generate_traffic_cot(
         candidate.get("announcementType", ""),
         candidate.get("featuresStr", ""),
     )
-    color = ET.Element("color")
-    color.set("argb", argb)
-    detail.append(color)
 
     if _is_accident(
         candidate.get("announcementType", ""),
         candidate.get("featuresStr", ""),
     ):
+        # Accident: MIL-STD a-u-G EUI*HA + color (no usericon)
+        color = ET.Element("color")
+        color.set("argb", argb)
+        detail.append(color)
+
         milicon = ET.Element("__milicon")
         milicon.set("id", "EUI*HA----*****")
         detail.append(milicon)
@@ -193,6 +195,8 @@ def generate_traffic_cot(
         milsym.set("id", "EUI*HA----*****")
         detail.append(milsym)
     else:
+        # Non-accident: usericon (caution/traffic_jam/restriction) — suppress <color> (icon already colored)
+        # Stroke still uses argb for polyline via strokeColor below
         actual_icon = _icon_for_announcement(
             candidate.get("announcementType", ""),
             candidate.get("featuresStr", ""),

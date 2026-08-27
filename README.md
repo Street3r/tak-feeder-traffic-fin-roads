@@ -14,10 +14,8 @@ All via environment variables / `.env`:
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `COT_URL` | `` (empty) | TAK server COT URL (TLS) — optional when using Mission API `put` package only; leave empty/`none` to disable COT stream |
 | `CLIENT_CERT` |  | mTLS cert PEM path |
 | `CLIENT_KEY` |  | mTLS key PEM path |
-| `PYTAK_TLS_DONT_VERIFY` | `0` | Skip TLS verify |
 | `API_HOST` |  | TAK Server API host (for mission) |
 | `API_PORT` | `8443` | TAK Server API port |
 | `MISSION_NAME` | `TrafficFinRoads` | Mission name |
@@ -47,7 +45,6 @@ Server-issued cert/key; remove password from key before use: `openssl rsa -in ce
 docker run -d \
   --name tak-feeder-traffic-fin-roads \
   -v /path/to/certs:/data:ro \
-  -e COT_URL=ssl://takserver:8089 \
   -e CLIENT_CERT=/data/cert.pem \
   -e CLIENT_KEY=/data/key.pem \
   -e API_HOST=takserver \
@@ -67,7 +64,6 @@ services:
     volumes:
       - ./certs:/data:ro
     environment:
-      - COT_URL=ssl://takserver:8089
       - CLIENT_CERT=/data/cert.pem
       - CLIENT_KEY=/data/key.pem
       - API_HOST=takserver

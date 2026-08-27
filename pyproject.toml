@@ -12,7 +12,6 @@ maintainers = [
 ]
 requires-python = ">=3.12,<4.0"
 dependencies = [
-    "pytak (>=7.2.1,<8.0.0)",
     "aiohttp (>=3.13.3,<4.0.0)",
     "requests (>=2.32.5,<3.0.0)",
     "click (>=8.3.1,<9.0.0)",
@@ -51,7 +50,7 @@ warn_redundant_casts = true
 warn_unused_configs = false
 
 [tool.pylint.messages_control]
-disable = ["too-many-locals", "too-many-statements", "too-many-return-statements", "unused-variable", "line-too-long", "fixme", "import-error", "missing-function-docstring", "invalid-name", "global-statement", "too-many-branches", "too-many-instance-attributes", "broad-exception-caught", "too-many-arguments"]
+disable = ["too-many-locals", "too-many-statements", "too-many-return-statements", "unused-variable", "line-too-long", "fixme", "import-error", "missing-function-docstring", "invalid-name", "global-statement", "too-many-branches", "too-many-instance-attributes", "broad-exception-caught", "too-many-arguments", "too-few-public-methods"]
 
 [tool.pylint.format]
 max-line-length = 88

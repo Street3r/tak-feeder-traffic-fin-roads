@@ -1,19 +1,16 @@
 """
-Main entry point for the Finnish road traffic TAK feeder (Mission API).
+Main entry point for the Finnish road traffic TAK feeder (Mission API only).
 
 Polls Digitraffic GeoJSON Simple JSON for traffic announcements and
-syncs to a TAK Server mission (DataSync). ATAK clients need the
-DataSync plugin; mission handles offline delivery and stale removal
-via UID diff (stale = endTime).
+syncs to a TAK Server mission (DataSync). No COT stream / pytak needed;
+uses REST put package only. stale = endTime, UID digitraffic.road.GUID.
 """
 
 import asyncio
 import logging
 import os
-from configparser import ConfigParser
 from typing import Any
 
-import pytak
 from dotenv import load_dotenv
 from python_takserver_api import Server  # type: ignore[attr-defined]
 
@@ -21,15 +18,8 @@ import tak_feeder_traffic_fin_roads.feeder as feeder_mod
 
 
 async def main() -> None:
-    """Initialize and run the road traffic feeder."""
+    """Initialize and run the road traffic feeder (mission-only)."""
     load_dotenv()
-
-    cot_url_raw = os.getenv("COT_URL", "")
-    # COT_URL is optional when using Mission API (put package); keep empty to disable COT stream
-    if cot_url_raw and cot_url_raw.lower() != "none":
-        cot_url = cot_url_raw
-    else:
-        cot_url = ""
 
     cert = os.getenv("CLIENT_CERT")
     if not cert or cert.lower() == "none":
@@ -43,7 +33,6 @@ async def main() -> None:
     if key and not os.path.isabs(key):
         key = os.path.abspath(key)
 
-    # Core settings
     update_interval = os.getenv("UPDATE_INTERVAL", "60")
     mission_name = os.getenv("MISSION_NAME", "TrafficFinRoads")
     mission_group = os.getenv("MISSION_GROUP", "")
@@ -62,10 +51,6 @@ async def main() -> None:
     )
 
     config_dict: dict[str, str] = {
-        "COT_URL": cot_url,
-        "PYTAK_TLS_CLIENT_CERT": cert,
-        "PYTAK_TLS_CLIENT_KEY": key,
-        "PYTAK_TLS_DONT_VERIFY": os.getenv("PYTAK_TLS_DONT_VERIFY", "0"),
         "DIGITRAFFIC_URL": digitraffic_url,
         "UPDATE_INTERVAL": update_interval,
         "MISSION_NAME": mission_name,
@@ -81,97 +66,56 @@ async def main() -> None:
         "DEBUG": os.getenv("DEBUG", "0"),
     }
 
-    # Setup takserver API client (for mission)
-    takserver: Any = None
-    if api_host:
-        takserver = Server(api_host, cert, key)
-        feeder_mod.takserver = takserver
-        feeder_mod.token = mission_token
-
-        # Try to obtain token if not provided
-        if not mission_token:
-            try:
-                print("Trying to create subscription...")
-                status, subscription = (
-                    await takserver.mission.create_mission_subscription(
-                        mission_name, my_uid
-                    )
-                )
-                if status == 201:
-                    tok = subscription["data"]["token"]
-                    role = subscription["data"]["role"]["type"]
-                    print(f"Subscription successful Role: {role} token: {tok}")
-                    feeder_mod.token = tok
-                    config_dict["MISSION_TOKEN"] = tok
-                elif status == 404:
-                    print("Mission does not exist, creating...")
-                    status2, mssn = await takserver.mission.create_mission(
-                        mission_name,
-                        my_uid,
-                        group=mission_group,
-                        default_role="MISSION_READONLY_SUBSCRIBER",
-                        classification="unclassified",
-                    )
-                    if status2 < 400:
-                        tok = mssn["data"][0]["token"]
-                        print(f"Mission created, token: {tok}")
-                        feeder_mod.token = tok
-                        config_dict["MISSION_TOKEN"] = tok
-                    else:
-                        print(f"{status2} {mssn}")
-                        print("Can neither subscribe to nor create mission. Exiting...")
-                        await takserver.close()
-                        return
-            except Exception as exc:  # pylint: disable=broad-exception-caught
-                print(f"Mission setup failed: {exc}")
-
-    # If COT_URL is empty and we have mission API, run mission sync standalone (no COT stream)
-    use_cot = bool(cot_url)
-    if not use_cot and not api_host:
-        print("No COT_URL and no API_HOST configured — nothing to do. Exiting.")
-        if takserver is not None:
-            await takserver.close()
-        return
-
-    if not use_cot and api_host:
-        # Mission-only mode: no pytak COT stream, just run mission sync loop
-        print(f"Running in mission-only mode (no COT_URL) -> mission {mission_name}")
-        if config_dict.get("DEBUG") == "1":
-            logging.getLogger().setLevel(logging.DEBUG)
-        try:
-            # Dummy queue for QueueWorker base (not used for COT stream)
-            dummy_queue: asyncio.Queue[bytes] = asyncio.Queue()
-            worker = feeder_mod.TrafficMissionWorker(dummy_queue, config_dict)  # type: ignore[arg-type]
-            await worker.run()
-        finally:
-            if takserver is not None:
-                await takserver.close()
-        return
-
-    config_parser = ConfigParser()
-    config_parser["mycottool"] = config_dict
-    config = config_parser["mycottool"]
-
-    if config.get("DEBUG") == "1":
+    if config_dict.get("DEBUG") == "1":
         logging.getLogger().setLevel(logging.DEBUG)
 
-    clitool = pytak.CLITool(config)
-    await clitool.setup()
+    if not api_host:
+        print("API_HOST not set — cannot run mission sync. Exiting.")
+        return
 
-    try:
-        clitool.add_tasks(
-            set(
-                [
-                    feeder_mod.KeepAliveWorker(clitool.tx_queue, config_dict),
-                    feeder_mod.TrafficMissionWorker(clitool.tx_queue, config_dict),
-                    feeder_mod.TrafficReceiver(clitool.rx_queue, config_dict),
-                ]
+    takserver: Any = Server(api_host, cert, key)
+    feeder_mod.takserver = takserver
+    feeder_mod.token = mission_token
+
+    if not mission_token:
+        try:
+            print("Trying to create subscription...")
+            status, subscription = await takserver.mission.create_mission_subscription(
+                mission_name, my_uid
             )
-        )
-        await clitool.run()
+            if status == 201:
+                tok = subscription["data"]["token"]
+                role = subscription["data"]["role"]["type"]
+                print(f"Subscription successful Role: {role} token: {tok}")
+                feeder_mod.token = tok
+                config_dict["MISSION_TOKEN"] = tok
+            elif status == 404:
+                print("Mission does not exist, creating...")
+                status2, mssn = await takserver.mission.create_mission(
+                    mission_name,
+                    my_uid,
+                    group=mission_group,
+                    default_role="MISSION_READONLY_SUBSCRIBER",
+                    classification="unclassified",
+                )
+                if status2 < 400:
+                    tok = mssn["data"][0]["token"]
+                    print(f"Mission created, token: {tok}")
+                    feeder_mod.token = tok
+                    config_dict["MISSION_TOKEN"] = tok
+                else:
+                    print(f"{status2} {mssn}")
+                    print("Can neither subscribe to nor create mission. Exiting...")
+                    await takserver.close()
+                    return
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            print(f"Mission setup failed: {exc}")
+
+    worker = feeder_mod.TrafficMissionWorker(config_dict)
+    try:
+        await worker.run()
     finally:
-        if takserver is not None:
-            await takserver.close()
+        await takserver.close()
 
 
 if __name__ == "__main__":

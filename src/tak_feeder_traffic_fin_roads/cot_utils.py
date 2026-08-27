@@ -190,9 +190,6 @@ def generate_traffic_cot(
         candidate.get("featuresStr", ""),
     )
 
-    # Determine if we need polyline handling early for color decision
-    _is_polyline_early = gtype in ("LineString", "MultiLineString")
-
     if _is_accident(
         candidate.get("announcementType", ""),
         candidate.get("featuresStr", ""),
@@ -209,12 +206,8 @@ def generate_traffic_cot(
         milsym.set("id", "EUI*HA----*****")
         detail.append(milsym)
     else:
-        # Non-accident: for polyline keep <color> for ATAK shape rendering, for point suppress
-        if _is_polyline_early:
-            color = ET.Element("color")
-            color.set("argb", argb)
-            detail.append(color)
-
+        # Non-accident: usericon (caution/traffic_jam/restriction) — suppress <color> (icon already colored)
+        # Stroke still uses argb for polyline via strokeColor below
         actual_icon = _icon_for_announcement(
             candidate.get("announcementType", ""),
             candidate.get("featuresStr", ""),

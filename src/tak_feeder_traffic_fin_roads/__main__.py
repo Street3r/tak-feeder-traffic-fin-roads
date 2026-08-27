@@ -50,7 +50,9 @@ async def main() -> None:
     api_port = os.getenv("API_PORT", "8443")
     cot_type = os.getenv("COT_TYPE", "a-n-G")
     cot_how = os.getenv("COT_HOW", "h-e")
-    iconset_path = os.getenv("ICONSET_PATH", "")
+    iconset_path = os.getenv(
+        "ICONSET_PATH", "6d781afb-89a6-4c07-b2b9-a89748b6a38f/Transport/caution.png"
+    )
     digitraffic_url = os.getenv(
         "DIGITRAFFIC_URL",
         "https://tie.digitraffic.fi/api/traffic-message/v2/traffic-announcements",

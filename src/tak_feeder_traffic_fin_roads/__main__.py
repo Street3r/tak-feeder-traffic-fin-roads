@@ -66,8 +66,11 @@ async def main() -> None:
         "DEBUG": os.getenv("DEBUG", "0"),
     }
 
-    if config_dict.get("DEBUG") == "1":
-        logging.getLogger().setLevel(logging.DEBUG)
+    # Setup logging (mission-only, no pytak CLITool to configure it)
+    log_level = logging.DEBUG if config_dict.get("DEBUG") == "1" else logging.INFO
+    logging.basicConfig(
+        level=log_level, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
 
     if not api_host:
         print("API_HOST not set — cannot run mission sync. Exiting.")

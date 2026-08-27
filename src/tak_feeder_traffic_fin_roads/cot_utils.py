@@ -55,6 +55,12 @@ def _color_for_announcement(announcement_type: str, features_str: str) -> str:
     return "-1"
 
 
+def _is_accident(announcement_type: str, features_str: str) -> bool:
+    """Check if incident is accident / onnettomuus."""
+    low = (announcement_type + " " + features_str).lower()
+    return "onnettomuus" in low or "accident" in low
+
+
 def _icon_for_announcement(
     announcement_type: str, features_str: str, default_icon: Optional[str]
 ) -> Optional[str]:
@@ -64,13 +70,25 @@ def _icon_for_announcement(
     - default: warning triangle 6d781afb-89a6-4c07-b2b9-a89748b6a38f/Transport/caution.png
     - traffic jam / ruuhka -> traffic_jam.png (covers 'ruuhka', 'jonoutunut', 'jono')
     - road closed / tie suljettu -> restriction.png (covers 'suljettu')
+    - accident / onnettomuus -> no usericon, uses MIL-STD a-u-G with milicon/milsym
     """
+    if _is_accident(announcement_type, features_str):
+        return None
     low = (announcement_type + " " + features_str).lower()
     if "ruuhka" in low or "jonout" in low or "jono" in low:
         return "6d781afb-89a6-4c07-b2b9-a89748b6a38f/Transport/traffic_jam.png"
     if "suljettu" in low:
         return "6d781afb-89a6-4c07-b2b9-a89748b6a38f/Transport/restriction.png"
     return default_icon
+
+
+def _cot_type_for_announcement(
+    announcement_type: str, features_str: str, default_type: str
+) -> str:
+    """Override COT type for accidents to a-u-G (unknown hazard accident)."""
+    if _is_accident(announcement_type, features_str):
+        return "a-u-G"
+    return default_type
 
 
 def generate_traffic_cot(
@@ -116,9 +134,16 @@ def generate_traffic_cot(
     # Use start as event start when available else now
     start_for_cot = start_dt if start_dt else now
 
+    # Override type for accidents to a-u-G (EUI*HA)
+    actual_cot_type = _cot_type_for_announcement(
+        candidate.get("announcementType", ""),
+        candidate.get("featuresStr", ""),
+        cot_type,
+    )
+
     root = ET.Element("event")
     root.set("version", "2.0")
-    root.set("type", cot_type)
+    root.set("type", actual_cot_type)
     root.set("uid", uid)
     root.set("how", cot_how)
     root.set("time", pytak.cot_time())
@@ -161,16 +186,29 @@ def generate_traffic_cot(
     color.set("argb", argb)
     detail.append(color)
 
-    # Usericon: default caution, jam override for ruuhka/jonout
-    actual_icon = _icon_for_announcement(
+    # Icon handling
+    # Accident -> MIL-STD EUI*HA (a-u-G) with milicon/milsym, no usericon
+    if _is_accident(
         candidate.get("announcementType", ""),
         candidate.get("featuresStr", ""),
-        iconset_path,
-    )
-    if actual_icon:
-        usericon = ET.Element("usericon")
-        usericon.set("iconsetpath", actual_icon)
-        detail.append(usericon)
+    ):
+        milicon = ET.Element("__milicon")
+        milicon.set("id", "EUI*HA----*****")
+        detail.append(milicon)
+        milsym = ET.Element("__milsym")
+        milsym.set("id", "EUI*HA----*****")
+        detail.append(milsym)
+    else:
+        # Usericon: default caution, jam/restriction overrides
+        actual_icon = _icon_for_announcement(
+            candidate.get("announcementType", ""),
+            candidate.get("featuresStr", ""),
+            iconset_path,
+        )
+        if actual_icon:
+            usericon = ET.Element("usericon")
+            usericon.set("iconsetpath", actual_icon)
+            detail.append(usericon)
 
     is_polyline = gtype in ("LineString", "MultiLineString")
 

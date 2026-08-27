@@ -137,7 +137,7 @@ class TrafficMissionWorker:
                 async with aiohttp.ClientSession() as session:
                     fc = await digitraffic.fetch_geojson(session, self.url)
                 candidates = digitraffic.extract_cot_candidates(fc)
-                # For polyline non-accidents we split into icon + line, so need both UIDs for diff
+                # For polyline non-accidents we split into icon + per-line shape(s)
                 cap_uids: list[str] = []
                 for c in candidates:
                     cap_uids.append(c["uid"])
@@ -146,7 +146,12 @@ class TrafficMissionWorker:
                         c.get("announcementType", ""), c.get("featuresStr", "")
                     )
                     if gtype in ("LineString", "MultiLineString") and not is_acc:
-                        cap_uids.append(f"{c['uid']}.line")
+                        coords = c.get("geometry", {}).get("coordinates", [])
+                        if gtype == "MultiLineString":
+                            for idx in range(len(coords)):  # type: ignore[arg-type]
+                                cap_uids.append(f"{c['uid']}.line.{idx}")
+                        else:
+                            cap_uids.append(f"{c['uid']}.line")
                 logger.info(
                     "Fetched %d features -> %d candidates (%d CoTs with split)",
                     len(fc.get("features", [])),
@@ -208,7 +213,7 @@ class TrafficMissionWorker:
                 )
                 is_poly = gtype in ("LineString", "MultiLineString")
                 if is_poly and not is_acc:
-                    # Split into icon (a-n-G) + shape (u-d-f) so ATAK shows both
+                    # Split into icon (a-n-G) + per-line shape(s) (u-d-f) so ATAK shows both without closing line
                     icon_cot = cot_utils.generate_traffic_cot(
                         cand,
                         cot_type=self.cot_type,
@@ -219,21 +224,39 @@ class TrafficMissionWorker:
                     )
                     if icon_cot:
                         cot_files[cand["uid"]] = icon_cot
-                    # Shape CoT (u-d-f, no icon, shape polyline)
                     argb = cot_utils._color_for_announcement(  # type: ignore[attr-defined]
                         cand.get("announcementType", ""), cand.get("featuresStr", "")
                     )
-                    shape_cot = cot_utils._generate_shape_cot(  # type: ignore[attr-defined]
-                        cand,
-                        cot_type_line=self.cot_type_line,
-                        cot_how=self.cot_how,
-                        mission_name=self.mission_name,
-                        argb=argb,
-                        centroid=cand.get("centroid"),
-                        geometry=cand.get("geometry", {}),
-                    )
-                    if shape_cot:
-                        cot_files[f"{cand['uid']}.line"] = shape_cot
+                    gtype2 = cand.get("geometry", {}).get("type", "Point")
+                    coords2 = cand.get("geometry", {}).get("coordinates", [])
+                    if gtype2 == "LineString":
+                        shape_cot = cot_utils._generate_shape_cot_single(  # type: ignore[attr-defined]
+                            cand,
+                            line_coords=coords2,  # type: ignore[arg-type]
+                            line_index=None,
+                            cot_type_line=self.cot_type_line,
+                            cot_how=self.cot_how,
+                            mission_name=self.mission_name,
+                            argb=argb,
+                            centroid=cand.get("centroid"),
+                        )
+                        if shape_cot:
+                            cot_files[f"{cand['uid']}.line"] = shape_cot
+                    elif gtype2 == "MultiLineString":
+                        for idx, line in enumerate(coords2):  # type: ignore[union-attr]
+                            # Decimate per line inside helper, but we pass single line
+                            shape_cot = cot_utils._generate_shape_cot_single(  # type: ignore[attr-defined]
+                                cand,
+                                line_coords=line,  # type: ignore[arg-type]
+                                line_index=idx,
+                                cot_type_line=self.cot_type_line,
+                                cot_how=self.cot_how,
+                                mission_name=self.mission_name,
+                                argb=argb,
+                                centroid=cand.get("centroid"),
+                            )
+                            if shape_cot:
+                                cot_files[f"{cand['uid']}.line.{idx}"] = shape_cot
                 else:
                     # Point or accident polyline (single CoT with icon+shape)
                     cot_data = cot_utils.generate_traffic_cot(

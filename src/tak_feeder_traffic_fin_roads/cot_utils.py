@@ -94,6 +94,97 @@ def _cot_type_for_announcement(
     return default_type
 
 
+def _generate_shape_cot_single(
+    candidate: Dict[str, Any],
+    line_coords: List[List[float]],
+    line_index: Optional[int],
+    cot_type_line: str,
+    cot_how: str,
+    mission_name: Optional[str],
+    argb: str,
+    centroid: Any,
+) -> Optional[bytes]:
+    """Generate shape CoT for a single line (used to avoid MultiLineString closing artifact)."""
+    uid_base: str = candidate.get("uid", "unknown")
+    suffix = f".line.{line_index}" if line_index is not None else ".line"
+    uid = f"{uid_base}{suffix}"
+    remarks: str = candidate.get("remarks", "")
+    callsign: str = candidate.get("callsign", uid)
+    _default_caution = "6d781afb-89a6-4c07-b2b9-a89748b6a38f/Transport/caution.png"
+    _icon_preview = _icon_for_announcement(
+        candidate.get("announcementType", ""),
+        candidate.get("featuresStr", ""),
+        "6d781afb-89a6-4c07-b2b9-a89748b6a38f/Transport/caution.png",
+    )
+    if _icon_preview == _default_caution and callsign != "Nostotyö":
+        callsign = "Häiriö"
+
+    lat, lon = centroid  # type: ignore[misc]
+    end_dt = _parse_iso8601(candidate.get("endTime"))
+    start_dt = _parse_iso8601(candidate.get("startTime"))
+    now = datetime.now(timezone.utc)
+    if end_dt:
+        stale_dt = end_dt
+    elif start_dt:
+        stale_dt = start_dt + timedelta(hours=24)
+    else:
+        stale_dt = now + timedelta(hours=24)
+    start_for_cot = start_dt if start_dt else now
+
+    root = ET.Element("event")
+    root.set("version", "2.0")
+    root.set("type", cot_type_line)
+    root.set("uid", uid)
+    root.set("how", cot_how)
+    root.set("time", _cot_time_now())
+    root.set("start", _cot_time_from_dt(start_for_cot))
+    root.set("stale", _cot_time_from_dt(stale_dt))
+    pt_attr = {"lat": str(lat), "lon": str(lon), "hae": "0", "ce": "10", "le": "10"}
+    ET.SubElement(root, "point", attrib=pt_attr)
+    detail = ET.Element("detail")
+    if mission_name:
+        marti = ET.Element("marti")
+        dest = ET.Element("dest")
+        dest.set("mission", mission_name)
+        marti.append(dest)
+        detail.append(marti)
+    contact = ET.Element("contact")
+    contact.set("callsign", callsign)
+    detail.append(contact)
+    remarks_el = ET.Element("remarks")
+    remarks_el.text = remarks
+    detail.append(remarks_el)
+    color = ET.Element("color")
+    color.set("argb", argb)
+    detail.append(color)
+    # Shape with single polyline + link for ATAK line rendering (no closing line)
+    shape = ET.Element("shape")
+    polyline = ET.Element("polyline")
+    for lon_p, lat_p in line_coords:  # type: ignore[misc]
+        vertex = ET.Element("vertex")
+        vertex.set("lat", str(lat_p))
+        vertex.set("lon", str(lon_p))
+        vertex.set("hae", "0")
+        polyline.append(vertex)
+    shape.append(polyline)
+    detail.append(shape)
+    for lon_p, lat_p in line_coords:  # type: ignore[misc]
+        link = ET.Element("link")
+        link.set("point", f"{lat_p},{lon_p}")
+        detail.append(link)
+    stroke_color = ET.Element("strokeColor")
+    stroke_color.set("value", argb)
+    detail.append(stroke_color)
+    stroke_weight = ET.Element("strokeWeight")
+    stroke_weight.set("value", "3")
+    detail.append(stroke_weight)
+    stroke_style = ET.Element("strokeStyle")
+    stroke_style.set("value", "solid")
+    detail.append(stroke_style)
+    root.append(detail)
+    return ET.tostring(root)
+
+
 def _generate_shape_cot(
     candidate: Dict[str, Any],
     cot_type_line: str,

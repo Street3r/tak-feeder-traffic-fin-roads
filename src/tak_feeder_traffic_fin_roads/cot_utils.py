@@ -55,6 +55,21 @@ def _color_for_announcement(announcement_type: str, features_str: str) -> str:
     return "-1"
 
 
+def _icon_for_announcement(
+    announcement_type: str, features_str: str, default_icon: Optional[str]
+) -> Optional[str]:
+    """
+    Map incident type to ATAK usericon.
+
+    - default: warning triangle 6d781afb-89a6-4c07-b2b9-a89748b6a38f/Transport/caution.png
+    - traffic jam / ruuhka -> traffic_jam.png (covers 'ruuhka', 'jonoutunut', 'jono')
+    """
+    low = (announcement_type + " " + features_str).lower()
+    if "ruuhka" in low or "jonout" in low or "jono" in low:
+        return "6d781afb-89a6-4c07-b2b9-a89748b6a38f/Transport/traffic_jam.png"
+    return default_icon
+
+
 def generate_traffic_cot(
     candidate: Dict[str, Any],
     cot_type: str = "a-n-G",
@@ -143,10 +158,15 @@ def generate_traffic_cot(
     color.set("argb", argb)
     detail.append(color)
 
-    # Usericon placeholder (user decision 2) - TODO look up actual iconset path
-    if iconset_path:
+    # Usericon: default caution, jam override for ruuhka/jonout
+    actual_icon = _icon_for_announcement(
+        candidate.get("announcementType", ""),
+        candidate.get("featuresStr", ""),
+        iconset_path,
+    )
+    if actual_icon:
         usericon = ET.Element("usericon")
-        usericon.set("iconsetpath", iconset_path)
+        usericon.set("iconsetpath", actual_icon)
         detail.append(usericon)
 
     is_polyline = gtype in ("LineString", "MultiLineString")

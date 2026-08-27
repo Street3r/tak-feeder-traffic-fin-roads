@@ -139,6 +139,16 @@ def generate_traffic_cot(
         cot_type,
     )
 
+    # Override callsign to Häiriö for generic triangle (default caution), except Nostotyö stays
+    _default_caution = "6d781afb-89a6-4c07-b2b9-a89748b6a38f/Transport/caution.png"
+    _icon_preview = _icon_for_announcement(
+        candidate.get("announcementType", ""),
+        candidate.get("featuresStr", ""),
+        iconset_path or _default_caution,
+    )
+    if _icon_preview == _default_caution and callsign != "Nostotyö":
+        callsign = "Häiriö"
+
     root = ET.Element("event")
     root.set("version", "2.0")
     root.set("type", actual_cot_type)
@@ -210,34 +220,43 @@ def generate_traffic_cot(
     is_polyline = gtype in ("LineString", "MultiLineString")
 
     if is_polyline:
-        flat_coords: List[List[float]] = []
+        # Split into separate lines to avoid straight-line artifact
+        # MultiLineString concatenating into one polyline draws a line back to start
+        lines: List[List[List[float]]] = []
         if gtype == "LineString":
-            flat_coords = coords  # type: ignore[assignment]
+            lines = [coords]  # type: ignore[assignment]
         elif gtype == "MultiLineString":
-            for line in coords:  # type: ignore[union-attr]
-                for pt in line:  # type: ignore[union-attr]
-                    flat_coords.append(pt)  # type: ignore[arg-type]
+            lines = coords  # type: ignore[assignment]
 
+        # Decimate to keep total points <200, per line proportionally
+        total_pts = sum(len(line) for line in lines)
         max_points = 200
-        if len(flat_coords) > max_points:
-            step = len(flat_coords) / max_points
-            flat_coords = [flat_coords[int(i * step)] for i in range(max_points)]
+        decimated_lines: List[List[List[float]]] = []
+        for line in lines:
+            if total_pts > max_points and len(line) > 1:
+                keep = max(2, int(len(line) * max_points / total_pts))
+                if len(line) > keep:
+                    step = len(line) / keep
+                    line = [line[int(i * step)] for i in range(keep)]  # type: ignore[arg-type]
+            decimated_lines.append(line)  # type: ignore[arg-type]
 
         shape = ET.Element("shape")
-        polyline = ET.Element("polyline")
-        for lon_p, lat_p in flat_coords:
-            vertex = ET.Element("vertex")
-            vertex.set("lat", str(lat_p))
-            vertex.set("lon", str(lon_p))
-            vertex.set("hae", "0")
-            polyline.append(vertex)
-        shape.append(polyline)
+        for line in decimated_lines:
+            polyline = ET.Element("polyline")
+            for lon_p, lat_p in line:  # type: ignore[misc]
+                vertex = ET.Element("vertex")
+                vertex.set("lat", str(lat_p))
+                vertex.set("lon", str(lon_p))
+                vertex.set("hae", "0")
+                polyline.append(vertex)
+            shape.append(polyline)
         detail.append(shape)
 
-        for lon_p, lat_p in flat_coords:
-            link = ET.Element("link")
-            link.set("point", f"{lat_p},{lon_p}")
-            detail.append(link)
+        for line in decimated_lines:
+            for lon_p, lat_p in line:  # type: ignore[misc]
+                link = ET.Element("link")
+                link.set("point", f"{lat_p},{lon_p}")
+                detail.append(link)
 
         stroke_color = ET.Element("strokeColor")
         stroke_color.set("value", argb)

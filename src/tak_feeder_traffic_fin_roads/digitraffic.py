@@ -134,32 +134,41 @@ def extract_cot_candidates(
 
         centroid = _centroid_of_coords(geometry)
 
-        # Build callsign: short form for ATAK - title first line or situationId
-        callsign = title.strip() if title else f"{situation_type} {situation_id[:8]}"
-        # Truncate callsign to ~40 chars for ATAK label
+        # Callsign = incident type per spec (user decision 4)
+        # Prefer human feature name ("Onnettomuus") else trafficAnnouncementType
+        incident_type = features_str if features_str else ann_type
+        callsign = (
+            incident_type.strip()
+            if incident_type
+            else f"{situation_type} {situation_id[:8]}"
+        )
+        # Keep callsign short for ATAK label
         if len(callsign) > 40:
             callsign = callsign[:37] + "..."
 
-        # Remarks: richer detail
-        remarks_lines = []
-        if title:
-            remarks_lines.append(title.strip())
-        if features_str:
-            remarks_lines.append(f"Features: {features_str}")
+        # Remarks = description per spec: use location description + comment
+        # Include title if it adds context, but primary is description
         if location_desc:
-            remarks_lines.append(location_desc.strip())
-        if comment:
-            remarks_lines.append(comment.strip())
-        if road_name:
-            remarks_lines.append(f"Road: {road_name}")
-        if ann_type:
-            remarks_lines.append(f"Type: {ann_type}")
-        remarks = "\n".join(remarks_lines) if remarks_lines else callsign
+            remarks = location_desc.strip()
+            if comment:
+                remarks += f"\n\n{comment.strip()}"
+            # Append title if different from incident type to give context
+            if title and title.strip() not in remarks:
+                remarks = f"{title.strip()}\n\n{remarks}"
+        elif title:
+            remarks = title.strip()
+            if comment:
+                remarks += f"\n\n{comment.strip()}"
+        else:
+            remarks = callsign
 
-        # UID: stable per situationId + geometry hash fallback
-        # Digitraffic situationId is stable across updates; include geometry type to allow multiples
-        gtype = geometry.get("type", "unknown")
-        uid = f"digitraffic.{situation_id}.{gtype.lower()}"
+        # Append additional sender info if useful
+        if sender:
+            remarks += f"\n\nSender: {sender}"
+
+        # UID: digitraffic.road.<situationId> per spec (user decision 1)
+        # SituationId is stable GUID, unique per Feature
+        uid = f"digitraffic.road.{situation_id}"
 
         candidates.append(
             {

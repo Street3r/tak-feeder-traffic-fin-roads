@@ -34,3 +34,6 @@ cert/
 # Digitraffic cache / ipynb
 .ipynb_checkpoints/
 *.ipynb
+
+# Agent coordination - local only, do not commit
+AGENTS.md

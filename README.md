@@ -4,7 +4,9 @@ TAK feeder for Finnish road traffic — Fintraffic Digitraffic GeoJSON Simple JS
 
 (C) 2026 Stefan Gofferje — Licensed under GPL-3.0-or-later.
 
-Polls `https://tie.digitraffic.fi/api/traffic-message/v2/traffic-announcements` (`FeatureCollection` with embedded `Point`/`LineString`/`MultiLineString`) and publishes CoT to a TAK Server. Geometry is embedded inline (unlike DATEX II XML which needs separate `area-geometries` lookups), so GeoJSON is preferred.
+Polls `https://tie.digitraffic.fi/api/traffic-message/v2/traffic-announcements` (`FeatureCollection` with embedded `Point`/`LineString`/`MultiLineString`) and publishes to a TAK Server **mission** (DataSync) for reliable offline delivery. Geometry is embedded inline (unlike DATEX II XML which needs separate `area-geometries` lookups), so GeoJSON is preferred.
+
+> Requires the ATAK DataSync plugin — mission sync handles stale removal (clients delete when item disappears), so new items reach clients even after offline. ATAK does not stale out polygons reliably.
 
 ## Configuration
 
@@ -12,19 +14,26 @@ All via environment variables / `.env`:
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `COT_URL` | `udp://239.2.3.1:6969` | TAK server COT URL (`ssl://host:8089` for TLS) |
+| `COT_URL` | `ssl://takserver:8089` | TAK server COT URL (TLS) |
 | `CLIENT_CERT` |  | mTLS cert PEM path |
 | `CLIENT_KEY` |  | mTLS key PEM path |
 | `PYTAK_TLS_DONT_VERIFY` | `0` | Skip TLS verify |
+| `API_HOST` |  | TAK Server API host (for mission) |
+| `API_PORT` | `8443` | TAK Server API port |
+| `MISSION_NAME` | `TrafficFinRoads` | Mission name |
+| `MISSION_GROUP` |  | Mission group |
+| `MISSION_TOKEN` |  | Mission token (auto-obtained if empty) |
+| `MY_UID` | `roads.0001` | Feeder UID |
 | `DIGITRAFFIC_URL` | `https://tie.digitraffic.fi/api/traffic-message/v2/traffic-announcements` | Digitraffic GeoJSON endpoint |
 | `UPDATE_INTERVAL` | `60` | Poll interval seconds |
-| `COT_STALE` | `300` | CoT stale seconds |
-| `COT_TYPE_POINT` | `a-f-G-E-V-C` | CoT type for Point incidents |
-| `COT_TYPE_LINE` | `u-d-f` | CoT type for LineString/MultiLineString |
+| `COT_TYPE` | `a-n-G` | Base CoT type (configurable, `a-n-G` default; add `ICONSET_PATH` when icon known) |
 | `COT_HOW` | `h-e` | CoT how |
+| `ICONSET_PATH` |  | ATAK usericon `iconsetpath` (placeholder until looked up) |
 | `DEBUG` | `0` | Debug logging |
 
-Other Digitraffic Simple JSON endpoints with identical shape: `/roadworks`, `/weight-restrictions`, `/exempted-transports` — set `DIGITRAFFIC_URL` accordingly.
+Details: UID `digitraffic.road.<situationId>`, callsign = incident type (`features[].name` or `trafficAnnouncementType`), remarks = description (`location.description` + `comment`), stale = `timeAndDuration.endTime` (or start+24h if missing — mission diff drives deletion).
+
+Other Digitraffic Simple JSON endpoints with identical shape: `/roadworks`, `/weight-restrictions`, `/exempted-transports` — not polled in this version.
 
 ## Certificates
 
@@ -41,6 +50,9 @@ docker run -d \
   -e COT_URL=ssl://takserver:8089 \
   -e CLIENT_CERT=/data/cert.pem \
   -e CLIENT_KEY=/data/key.pem \
+  -e API_HOST=takserver \
+  -e API_PORT=8443 \
+  -e MISSION_NAME=TrafficFinRoads \
   -e DIGITRAFFIC_URL=https://tie.digitraffic.fi/api/traffic-message/v2/traffic-announcements \
   ghcr.io/sgofferj/tak-feeder-traffic-fin-roads:latest
 ```
@@ -58,6 +70,9 @@ services:
       - COT_URL=ssl://takserver:8089
       - CLIENT_CERT=/data/cert.pem
       - CLIENT_KEY=/data/key.pem
+      - API_HOST=takserver
+      - API_PORT=8443
+      - MISSION_NAME=TrafficFinRoads
       - UPDATE_INTERVAL=60
 ```
 

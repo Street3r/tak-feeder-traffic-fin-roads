@@ -20,7 +20,6 @@ All via environment variables / `.env`:
 | `API_PORT` | `8443` | TAK Server API port |
 | `MISSION_NAME` | `TrafficFinRoads` | Mission name |
 | `MISSION_GROUP` |  | Mission group |
-| `MISSION_TOKEN` |  | Mission token (auto-obtained if empty) |
 | `MY_UID` | `roads.0001` | Feeder UID |
 | `DIGITRAFFIC_URL` | `https://tie.digitraffic.fi/api/traffic-message/v2/traffic-announcements` | Digitraffic GeoJSON endpoint |
 | `UPDATE_INTERVAL` | `60` | Poll interval seconds |

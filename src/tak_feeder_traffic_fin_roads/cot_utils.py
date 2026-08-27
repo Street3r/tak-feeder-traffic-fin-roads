@@ -77,10 +77,11 @@ def _icon_for_announcement(
     if _is_accident(announcement_type, features_str):
         return None
     low = (announcement_type + " " + features_str).lower()
-    if "ruuhka" in low or "jonout" in low or "jono" in low:
-        return "6d781afb-89a6-4c07-b2b9-a89748b6a38f/Transport/traffic_jam.png"
+    # restriction (Tie suljettu) takes precedence over traffic_jam when both present
     if "suljettu" in low:
         return "6d781afb-89a6-4c07-b2b9-a89748b6a38f/Transport/restriction.png"
+    if "ruuhka" in low or "jonout" in low or "jono" in low:
+        return "6d781afb-89a6-4c07-b2b9-a89748b6a38f/Transport/traffic_jam.png"
     return default_icon
 
 

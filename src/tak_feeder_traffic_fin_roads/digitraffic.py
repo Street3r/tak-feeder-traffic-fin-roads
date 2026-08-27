@@ -107,6 +107,7 @@ def extract_cot_candidates(
         title = ""
         location_desc = ""
         features_str = ""
+        feat_names: List[str] = []
         start_time: Optional[str] = None
         end_time: Optional[str] = None
         comment: Optional[str] = None
@@ -134,17 +135,31 @@ def extract_cot_candidates(
 
         centroid = _centroid_of_coords(geometry)
 
-        # Callsign = incident type per spec (user decision 4)
-        # Prefer human feature name ("Onnettomuus") else trafficAnnouncementType
-        incident_type = features_str if features_str else ann_type
-        callsign = (
-            incident_type.strip()
-            if incident_type
-            else f"{situation_type} {situation_id[:8]}"
-        )
-        # Keep callsign short for ATAK label
-        if len(callsign) > 40:
-            callsign = callsign[:37] + "..."
+        # Callsign = short incident type (user: Tie suljettu, Nostotyö, Onnettomuus, etc.)
+        # Map long Digitraffic names to short ATAK labels
+        _SHORT = {
+            "Tie on suljettu liikenteeltä": "Tie suljettu",
+            "Tapahtumapaikalla on käytössä kiertotie": "Kiertotie",
+            "Lautan kantavuus on muuttunut": "Lautta",
+            "Liikennejärjestelyt ovat muuttuneet": "Järjestely",
+            "Raskaan ajoneuvon nostotyö": "Nostotyö",
+            "Onnettomuus": "Onnettomuus",
+            "Tapahtumapaikalla liikenteenohjaus": "Ohjaus",
+            "Liikenne saattaa ruuhkautua": "Ruuhka",
+            "Paikalla on kiertotieopastus": "Kiertotieopastus",
+            "Ajokaista suljettu liikenteeltä": "Kaista suljettu",
+            "Liikenne on palautumassa normaaliksi": "Palautuu",
+        }
+        if feat_names:
+            first_name = feat_names[0]
+            callsign = _SHORT.get(first_name, first_name)
+            # Fallback: truncate unknown long names to 20 chars
+            if len(callsign) > 20:
+                callsign = callsign[:17] + "..."
+        elif ann_type:
+            callsign = _SHORT.get(ann_type, ann_type)
+        else:
+            callsign = f"{situation_type} {situation_id[:8]}"
 
         # Remarks = description per spec: use location description + comment
         # Include title if it adds context, but primary is description

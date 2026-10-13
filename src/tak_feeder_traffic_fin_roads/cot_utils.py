@@ -116,8 +116,9 @@ def _generate_shape_cot_single(
         candidate.get("featuresStr", ""),
         "6d781afb-89a6-4c07-b2b9-a89748b6a38f/Transport/caution.png",
     )
-    if _icon_preview == _default_caution and callsign != "Nostotyö":
-        callsign = "Häiriö"
+    if (_icon_preview == _default_caution and callsign != "Heavy lift"
+            and candidate.get("dataset", "traffic-announcements") == "traffic-announcements"):
+        callsign = "Disruption"
 
     lat, lon = centroid  # type: ignore[misc]
     end_dt = _parse_iso8601(candidate.get("endTime"))
@@ -199,15 +200,16 @@ def _generate_shape_cot(
     uid = f"{uid_base}.line"
     remarks: str = candidate.get("remarks", "")
     callsign: str = candidate.get("callsign", uid)
-    # Apply same Häiriö override as icon CoT so both share label
+    # Apply the same Disruption override as icon CoT so both share label
     _default_caution = "6d781afb-89a6-4c07-b2b9-a89748b6a38f/Transport/caution.png"
     _icon_preview = _icon_for_announcement(
         candidate.get("announcementType", ""),
         candidate.get("featuresStr", ""),
         "6d781afb-89a6-4c07-b2b9-a89748b6a38f/Transport/caution.png",
     )
-    if _icon_preview == _default_caution and callsign != "Nostotyö":
-        callsign = "Häiriö"
+    if (_icon_preview == _default_caution and callsign != "Heavy lift"
+            and candidate.get("dataset", "traffic-announcements") == "traffic-announcements"):
+        callsign = "Disruption"
 
     lat, lon = centroid  # type: ignore[misc]
     gtype = geometry.get("type", "Point")
@@ -344,15 +346,16 @@ def generate_traffic_cot(
         cot_type,
     )
 
-    # Override callsign to Häiriö for generic triangle (default caution), except Nostotyö stays
+    # Generic triangle (default caution) announcements are labelled Disruption, except heavy lifts
     _default_caution = "6d781afb-89a6-4c07-b2b9-a89748b6a38f/Transport/caution.png"
     _icon_preview = _icon_for_announcement(
         candidate.get("announcementType", ""),
         candidate.get("featuresStr", ""),
         iconset_path or _default_caution,
     )
-    if _icon_preview == _default_caution and callsign != "Nostotyö":
-        callsign = "Häiriö"
+    if (_icon_preview == _default_caution and callsign != "Heavy lift"
+            and candidate.get("dataset", "traffic-announcements") == "traffic-announcements"):
+        callsign = "Disruption"
 
     root = ET.Element("event")
     root.set("version", "2.0")

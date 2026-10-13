@@ -1,62 +1,29 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "tak-feeder-traffic-fin-roads"
-version = "0.1.0"
-description = "TAK feeder for Finnish road traffic (Fintraffic Digitraffic GeoJSON)"
+dynamic = ["version"]
+description = "Finnish road traffic messages (Digitraffic) as TAK missions"
 readme = "README.md"
-license = { text = "GPL-3.0-or-later" }
-authors = [
-    { name = "Stefan Gofferje", email = "stefan@gofferje.net" },
-]
-maintainers = [
-    { name = "Stefan Gofferje", email = "stefan@gofferje.net" },
-]
-requires-python = ">=3.12,<4.0"
+license = "GPL-3.0-or-later"
+authors = [{ name = "Stefan Gofferje" }, { name = "Street3r" }]
+requires-python = ">=3.12"
 dependencies = [
-    "aiohttp (>=3.13.3,<4.0.0)",
-    "requests (>=2.32.5,<3.0.0)",
-    "click (>=8.3.1,<9.0.0)",
-    "python-dotenv (>=1.2.1,<2.0.0)",
-    "cryptography (>=46.0.5,<47.0.0)",
-    "python-takserver-api @ git+https://github.com/sgofferj/python-takserver-api.git",
-]
-
-[dependency-groups]
-dev = [
-    "black (>=26.1.0,<27.0.0)",
-    "mypy (>=1.19.1,<2.0.0)",
-    "pylint (>=4.0.4,<5.0.0)",
-    "pre-commit (>=4.5.1,<5.0.0)",
-    "types-requests (>=2.32.4.20260107,<3.0.0.0)",
-    "types-aiohttp (>=3.13.3.0,<4.0.0.0)",
+    "pytak>=7.5.2,<8",
+    "python-takserver-api @ git+https://github.com/sgofferj/python-takserver-api.git@48f410764a6a19a8d97eb4827c860fb771b31dee",
+    "tzdata",
 ]
 
 [project.scripts]
-start = "tak_feeder_traffic_fin_roads.__main__:main"
+tak-feeder-traffic-fin-roads = "tak_feeder_traffic_fin_roads.__main__:run"
 
-[build-system]
-requires = ["poetry-core>=2.0.0,<3.0.0"]
-build-backend = "poetry.core.masonry.api"
+[tool.setuptools.dynamic]
+version = { attr = "tak_feeder_traffic_fin_roads.__version__" }
 
-[tool.black]
-line-length = 88
-target-version = ['py312']
+[tool.setuptools.packages.find]
+where = ["src"]
 
-[tool.mypy]
-python_version = "3.12"
-strict = true
-ignore_missing_imports = true
-warn_unused_ignores = false
-warn_redundant_casts = true
-warn_unused_configs = false
-
-[tool.pylint.messages_control]
-disable = ["too-many-locals", "too-many-statements", "too-many-return-statements", "unused-variable", "line-too-long", "fixme", "import-error", "missing-function-docstring", "invalid-name", "global-statement", "too-many-branches", "too-many-instance-attributes", "broad-exception-caught", "too-many-arguments", "too-few-public-methods", "too-many-positional-arguments", "unused-argument", "protected-access"]
-
-[tool.pylint.format]
-max-line-length = 88
-
-[tool.pylint.basic]
-good-names = ["e", "f", "i", "j", "k", "v", "x", "y"]
-
-[tool.pylint.design]
-max-args = 7
+[tool.setuptools.package-data]
+"*" = ["*.json"]

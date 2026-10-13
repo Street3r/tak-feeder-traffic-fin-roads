@@ -25,23 +25,168 @@ Response is a GeoJSON FeatureCollection:
   }
 """
 
-from typing import Any, Dict, List, Tuple, Optional
-import aiohttp
+# Copyright Stefan Gofferje; Copyright (C) 2026 Street3r (datasets, English labels)
 
-DEFAULT_URL = "https://tie.digitraffic.fi/api/traffic-message/v2/traffic-announcements"
+import json
+from typing import Any, Dict, List, Optional, Tuple
+
+from . import __version__
+from .common import digitraffic_headers, fetch, remarks_text
+
+BASE_URL = "https://tie.digitraffic.fi/api/traffic-message/v2"
+DEFAULT_URL = f"{BASE_URL}/traffic-announcements"
+SOURCE_LINE = "Source: Fintraffic / digitraffic.fi, CC BY 4.0"
+
+# Datasets of the Simple JSON API: path -> (fallback label, hashtag)
+DATASETS: Dict[str, Tuple[str, str]] = {
+    "traffic-announcements": ("Announcement", "announcement"),
+    "roadworks": ("Roadwork", "roadwork"),
+    "weight-restrictions": ("Weight limit", "weightlimit"),
+    "exempted-transports": ("Exempted transport", "exemptedtransport"),
+}
+
+# Short English callsigns for common Digitraffic feature names
+SHORT_LABELS = {
+    "Tie on suljettu liikenteeltä": "Road closed",
+    "Tapahtumapaikalla on käytössä kiertotie": "Detour",
+    "Lautan kantavuus on muuttunut": "Ferry",
+    "Liikennejärjestelyt ovat muuttuneet": "Arrangements",
+    "Raskaan ajoneuvon nostotyö": "Heavy lift",
+    "Onnettomuus": "Accident",
+    "Tapahtumapaikalla liikenteenohjaus": "Traffic control",
+    "Liikenne saattaa ruuhkautua": "Congestion",
+    "Paikalla on kiertotieopastus": "Detour signs",
+    "Ajokaista suljettu liikenteeltä": "Lane closed",
+    "Liikenne on palautumassa normaaliksi": "Clearing",
+    "Painorajoitus": "Weight limit",
+    "Tietyö": "Roadwork",
+}
 
 
-async def fetch_geojson(
-    session: aiohttp.ClientSession, url: str = DEFAULT_URL
-) -> Dict[str, Any]:
-    """Fetch Digitraffic GeoJSON FeatureCollection."""
-    timeout = aiohttp.ClientTimeout(total=15)
-    headers = {"User-Agent": "tak-feeder-traffic-fin-roads/0.1.0"}
+async def fetch_geojson(url: str = DEFAULT_URL,
+                        user: str = "tak-feeder-traffic-fin-roads") -> Dict[str, Any]:
+    """Fetch a Digitraffic GeoJSON FeatureCollection (gzip, Digitraffic-User)."""
+    body = await fetch(url, digitraffic_headers(user, "tak-feeder-traffic-fin-roads",
+                                                __version__), timeout=30)
+    data: Dict[str, Any] = json.loads(body)
+    return data
 
-    async with session.get(url, headers=headers, timeout=timeout) as resp:
-        resp.raise_for_status()
-        data: Dict[str, Any] = await resp.json(content_type=None)
-        return data
+
+def _feature_text(feature: Dict[str, Any]) -> str:
+    """Feature name with its quantity, e.g. "Painorajoitus 12 t"."""
+    name = str(feature.get("name") or feature.get("description") or "").strip()
+    quantity, unit = feature.get("quantity"), feature.get("unit")
+    if name and quantity not in (None, ""):
+        name += f" {quantity:g}" if isinstance(quantity, (int, float)) else f" {quantity}"
+        if unit:
+            name += f" {unit}"
+    return name
+
+
+def _roadwork_names(ann: Dict[str, Any]) -> List[str]:
+    """Work types and restrictions of road work phases (names vary by phase)."""
+    names: List[str] = []
+    for phase in ann.get("roadWorkPhases", []) or []:
+        for work in phase.get("workTypes", []) or []:
+            text = str(work.get("description") or work.get("type") or "").strip()
+            if text and text not in names:
+                names.append(text)
+        for restr in phase.get("restrictions", []) or []:
+            inner = restr.get("restriction") if isinstance(restr.get("restriction"), dict) else restr
+            text = _feature_text(inner or {})
+            if text and text not in names:
+                names.append(text)
+    return names
+
+
+def extract_cot_candidates(
+    feature_collection: Dict[str, Any], dataset: str = "traffic-announcements"
+) -> List[Dict[str, Any]]:
+    """
+    Normalized candidates for CoT conversion from a FeatureCollection.
+    Each dict holds: uid, geometry, centroid, callsign, remarks, times etc.
+    """
+    fallback_label, dataset_tag = DATASETS.get(dataset, ("Announcement", "traffic"))
+    candidates: List[Dict[str, Any]] = []
+    for feat in feature_collection.get("features", []) or []:
+        props: Dict[str, Any] = feat.get("properties", {}) or {}
+        geometry: Dict[str, Any] = feat.get("geometry", {}) or {}
+        situation_id: str = props.get("situationId", "unknown")
+        situation_type: str = props.get("situationType", "TRAFFIC_ANNOUNCEMENT")
+        # Used for colours and icons; road works etc. have no announcement type
+        ann_type: str = props.get("trafficAnnouncementType") or (
+            situation_type.lower().replace("_", "") if situation_type else "general")
+        announcements: List[Dict[str, Any]] = props.get("announcements", []) or []
+
+        title = location_desc = features_str = ""
+        feat_names: List[str] = []
+        start_time = end_time = comment = sender = road_name = None
+        if announcements:
+            ann = announcements[0]
+            title = ann.get("title", "") or ""
+            loc = ann.get("location", {}) or {}
+            location_desc = loc.get("description", "") or ""
+            feat_names = [_feature_text(f) for f in ann.get("features", []) or []]
+            feat_names = [n for n in feat_names if n] + _roadwork_names(ann)
+            features_str = ", ".join(feat_names)
+            tad = ann.get("timeAndDuration", {}) or {}
+            start_time = tad.get("startTime")
+            end_time = tad.get("endTime")
+            comment = ann.get("comment")
+            sender = ann.get("sender")
+            ldetails = ann.get("locationDetails", {}) or {}
+            ral = ldetails.get("roadAddressLocation", {}) or {}
+            primary = ral.get("primaryPoint", {}) or {}
+            road_name = primary.get("roadName")
+
+        centroid = _centroid_of_coords(geometry)
+
+        # Callsign: short incident type
+        if feat_names and dataset == "traffic-announcements":
+            first = feat_names[0]
+            callsign = SHORT_LABELS.get(first, first)
+            if len(callsign) > 20:
+                callsign = callsign[:17] + "..."
+        else:
+            callsign = fallback_label
+
+        lines: List[Optional[str]] = [
+            title.strip() or None,
+            location_desc.strip() or None,
+            f"Road: {road_name}" if road_name else None,
+            f"Details: {features_str}" if features_str else None,
+            comment.strip() if comment else None,
+            f"Valid: {start_time or '?'} – {end_time or 'until further notice'}"
+            if start_time or end_time else None,
+            f"Sender: {sender}" if sender else None,
+        ]
+        tags = ["traffic", dataset_tag]
+        if "onnettomuus" in features_str.lower() or "accident" in ann_type.lower():
+            tags.append("accident")
+        remarks = remarks_text(lines, SOURCE_LINE, tags) if any(lines) else callsign
+
+        candidates.append({
+            "uid": f"digitraffic.road.{situation_id}",  # as in upstream
+            "situationId": situation_id,
+            "situationType": situation_type,
+            "announcementType": ann_type,
+            "dataset": dataset,
+            "geometry": geometry,
+            "properties": props,
+            "centroid": centroid,
+            "callsign": callsign,
+            "remarks": remarks,
+            "locationDesc": location_desc,
+            "startTime": start_time,
+            "endTime": end_time,
+            "sender": sender,
+            "title": title,
+            "featuresStr": features_str,
+            "roadName": road_name,
+            "releaseTime": props.get("releaseTime"),
+            "versionTime": props.get("versionTime"),
+        })
+    return candidates
 
 
 def _centroid_of_coords(
@@ -84,128 +229,3 @@ def _centroid_of_coords(
     return None
 
 
-def extract_cot_candidates(
-    feature_collection: Dict[str, Any],
-) -> List[Dict[str, Any]]:
-    """
-    Extract normalized candidates for CoT conversion from FeatureCollection.
-    Each dict contains: uid, geometry, properties, centroid, callsign, remarks, stale hints.
-    """
-    candidates: List[Dict[str, Any]] = []
-    features = feature_collection.get("features", [])
-
-    for feat in features:
-        props: Dict[str, Any] = feat.get("properties", {}) or {}
-        geometry: Dict[str, Any] = feat.get("geometry", {}) or {}
-
-        situation_id: str = props.get("situationId", "unknown")
-        situation_type: str = props.get("situationType", "traffic announcement")
-        ann_type: str = props.get("trafficAnnouncementType", "general")
-
-        announcements: List[Dict[str, Any]] = props.get("announcements", []) or []
-        # Use first announcement for human-readable fields (all announcements are fi/fi mostly)
-        title = ""
-        location_desc = ""
-        features_str = ""
-        feat_names: List[str] = []
-        start_time: Optional[str] = None
-        end_time: Optional[str] = None
-        comment: Optional[str] = None
-        sender: Optional[str] = None
-        road_name: Optional[str] = None
-
-        if announcements:
-            ann = announcements[0]
-            title = ann.get("title", "") or ""
-            loc = ann.get("location", {}) or {}
-            location_desc = loc.get("description", "") or ""
-            # Human-readable feature names like "Onnettomuus", "Ajokaista suljettu"
-            feat_names = [f.get("name", "") for f in ann.get("features", []) or []]
-            features_str = ", ".join([n for n in feat_names if n])
-            tad = ann.get("timeAndDuration", {}) or {}
-            start_time = tad.get("startTime")
-            end_time = tad.get("endTime")
-            comment = ann.get("comment")
-            sender = ann.get("sender")
-            # Try to extract roadName from locationDetails
-            ldetails = ann.get("locationDetails", {}) or {}
-            ral = ldetails.get("roadAddressLocation", {}) or {}
-            primary = ral.get("primaryPoint", {}) or {}
-            road_name = primary.get("roadName")
-
-        centroid = _centroid_of_coords(geometry)
-
-        # Callsign = short incident type (user: Tie suljettu, Nostotyö, Onnettomuus, etc.)
-        # Map long Digitraffic names to short ATAK labels
-        _SHORT = {
-            "Tie on suljettu liikenteeltä": "Tie suljettu",
-            "Tapahtumapaikalla on käytössä kiertotie": "Kiertotie",
-            "Lautan kantavuus on muuttunut": "Lautta",
-            "Liikennejärjestelyt ovat muuttuneet": "Järjestely",
-            "Raskaan ajoneuvon nostotyö": "Nostotyö",
-            "Onnettomuus": "Onnettomuus",
-            "Tapahtumapaikalla liikenteenohjaus": "Ohjaus",
-            "Liikenne saattaa ruuhkautua": "Ruuhka",
-            "Paikalla on kiertotieopastus": "Kiertotieopastus",
-            "Ajokaista suljettu liikenteeltä": "Kaista suljettu",
-            "Liikenne on palautumassa normaaliksi": "Palautuu",
-        }
-        if feat_names:
-            first_name = feat_names[0]
-            callsign = _SHORT.get(first_name, first_name)
-            # Fallback: truncate unknown long names to 20 chars
-            if len(callsign) > 20:
-                callsign = callsign[:17] + "..."
-        elif ann_type:
-            callsign = _SHORT.get(ann_type, ann_type)
-        else:
-            callsign = f"{situation_type} {situation_id[:8]}"
-
-        # Remarks = description per spec: use location description + comment
-        # Include title if it adds context, but primary is description
-        if location_desc:
-            remarks = location_desc.strip()
-            if comment:
-                remarks += f"\n\n{comment.strip()}"
-            # Append title if different from incident type to give context
-            if title and title.strip() not in remarks:
-                remarks = f"{title.strip()}\n\n{remarks}"
-        elif title:
-            remarks = title.strip()
-            if comment:
-                remarks += f"\n\n{comment.strip()}"
-        else:
-            remarks = callsign
-
-        # Append additional sender info if useful
-        if sender:
-            remarks += f"\n\nSender: {sender}"
-
-        # UID: digitraffic.road.<situationId> per spec (user decision 1)
-        # SituationId is stable GUID, unique per Feature
-        uid = f"digitraffic.road.{situation_id}"
-
-        candidates.append(
-            {
-                "uid": uid,
-                "situationId": situation_id,
-                "situationType": situation_type,
-                "announcementType": ann_type,
-                "geometry": geometry,
-                "properties": props,
-                "centroid": centroid,
-                "callsign": callsign,
-                "remarks": remarks,
-                "locationDesc": location_desc,
-                "startTime": start_time,
-                "endTime": end_time,
-                "sender": sender,
-                "title": title,
-                "featuresStr": features_str,
-                "roadName": road_name,
-                "releaseTime": props.get("releaseTime"),
-                "versionTime": props.get("versionTime"),
-            }
-        )
-
-    return candidates

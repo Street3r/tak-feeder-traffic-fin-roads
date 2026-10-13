@@ -1,30 +1,26 @@
-# Stage 1: Build
+# Stage 1: build
 FROM python:3.12-slim AS builder
-
 WORKDIR /app
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    git \
-    && rm -rf /var/lib/apt/lists/*
-
+# git is needed to install python-takserver-api from GitHub
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+ && rm -rf /var/lib/apt/lists/*
 COPY pyproject.toml README.md ./
 COPY src/ ./src/
+RUN pip install --no-cache-dir --prefix=/install .
 
-# Install the package and its dependencies
-RUN pip install --no-cache-dir .
-
-# Stage 2: Runtime
+# Stage 2: runtime
 FROM python:3.12-slim
-
+LABEL org.opencontainers.image.source="https://github.com/Street3r/tak-feeder-traffic-fin-roads" \
+      org.opencontainers.image.description="Finnish road traffic messages (Digitraffic) as TAK missions" \
+      org.opencontainers.image.licenses="GPL-3.0-or-later"
+COPY --from=builder /install /usr/local
+# Unprivileged user. The certificate and key must be readable by uid 10001,
+# or run the container with user: "0:0" (see README).
+RUN useradd --system --uid 10001 --home-dir /data --no-create-home feeder
+ENV PYTHONUNBUFFERED=1 \
+    HEALTH_FILE=/tmp/tak-feeder-unhealthy
+USER 10001
 WORKDIR /app
-
-# Copy installed packages from builder
-COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
-COPY --from=builder /usr/local/bin /usr/local/bin
-
-# Copy source for runtime (and for debugging)
-COPY src/ ./src/
-COPY pyproject.toml ./
-
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
+    CMD ["python", "-c", "import os, sys; sys.exit(os.path.exists(os.environ['HEALTH_FILE']))"]
 ENTRYPOINT ["python", "-m", "tak_feeder_traffic_fin_roads"]

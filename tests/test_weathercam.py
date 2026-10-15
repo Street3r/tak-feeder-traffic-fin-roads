@@ -54,11 +54,57 @@ class ExtractTest(unittest.TestCase):
         self.assertIn("C100.jpg?thumbnail=true", weathercam.station_remarks(st, ws))
 
 
+class EmbedTest(unittest.TestCase):
+    def test_image_cot(self) -> None:
+        fc = {"features": [station("C1"), station("C2")]}
+        files = weathercam.build_cot_files(fc, weathercam.WeathercamSettings(), "M",
+                                           {"C1": "QUJD"})
+        ev = ET.fromstring(files["digitraffic.weathercam.C1"])
+        self.assertEqual(ev.get("type"), "b-i-x-i")
+        self.assertEqual(ev.find("detail/image").get("mime"), "image/jpeg")
+        self.assertEqual(ev.find("detail/image").text, "QUJD")
+        other = ET.fromstring(files["digitraffic.weathercam.C2"])
+        self.assertEqual(other.get("type"), "b-m-p-s-p-loc")
+        self.assertIsNone(other.find("detail/image"))
+
+    def test_signature_follows_image(self) -> None:
+        ws = weathercam.WeathercamSettings()
+        st = weathercam.extract_stations({"features": [station("C1")]}, ws)[0]
+        sig = [feeder.cot_signature(ET.fromstring(weathercam.station_cot(st, ws, "M", image=i)))
+               for i in ("QUJD", "QUJD", "REVG")]
+        self.assertEqual(sig[0], sig[1])
+        self.assertNotEqual(sig[0], sig[2])
+
+    def test_cache(self) -> None:
+        calls = []
+
+        def get(url, headers):
+            calls.append((url, headers.get("If-None-Match")))
+            return (304, "", b"") if headers.get("If-None-Match") else (200, '"e1"', b"ABC")
+
+        fc = {"features": [station("C1"), station("C2", lon=27.0, lat=65.0)]}
+        ws = weathercam.WeathercamSettings(embed_bbox=(19.0, 59.0, 26.0, 61.0))
+        cache = weathercam.ThumbnailCache(get=get, sleep=mock.AsyncMock())
+        self.assertEqual(asyncio.run(cache.refresh(fc, ws, {})), {"C1": "QUJD"})
+        self.assertEqual(asyncio.run(cache.refresh(fc, ws, {})), {"C1": "QUJD"})
+        self.assertEqual(calls, [
+            ("https://weathercam.digitraffic.fi/C100.jpg?thumbnail=true", None),
+            ("https://weathercam.digitraffic.fi/C100.jpg?thumbnail=true", '"e1"')])
+        # no embed area: nothing fetched, nothing embedded
+        self.assertEqual(asyncio.run(cache.refresh(fc, weathercam.WeathercamSettings(), {})), {})
+
+    def test_embed_max(self) -> None:
+        fc = {"features": [station(f"C{i}") for i in range(5)]}
+        ws = weathercam.WeathercamSettings(embed_bbox=(19.0, 59.0, 26.0, 61.0), embed_max=2)
+        self.assertEqual(len(weathercam.ThumbnailCache().embedded(fc, ws)), 2)
+
+
 class SettingsTest(unittest.TestCase):
     def test_env(self) -> None:
         env = {"DATASETS": "traffic-announcements,weathercams",
                "WEATHERCAMS_MISSION_GROUP": "WEATHERCAM,WEATHER,TRAFFIC",
-               "WEATHERCAMS_BBOX": "19,59,32,71", "WEATHERCAMS_THUMBNAILS": "1"}
+               "WEATHERCAMS_BBOX": "19,59,32,71", "WEATHERCAMS_THUMBNAILS": "1",
+               "WEATHERCAMS_EMBED_BBOX": "24.5,60.1,25.3,60.4"}
         with mock.patch.dict("os.environ", env, clear=True):
             s = feeder.Settings.from_env()
         cams = s.datasets[1]
@@ -68,6 +114,8 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(s.datasets[0].interval, 0.0)
         self.assertEqual(s.weathercam.bbox, (19.0, 59.0, 32.0, 71.0))
         self.assertTrue(s.weathercam.thumbnails)
+        self.assertEqual(s.weathercam.embed_bbox, (24.5, 60.1, 25.3, 60.4))
+        self.assertEqual(s.weathercam.cot_type, "b-m-p-s-p-loc")
 
     def test_bad_bbox(self) -> None:
         with mock.patch.dict("os.environ", {"WEATHERCAMS_BBOX": "a,b,c,d"}, clear=True):

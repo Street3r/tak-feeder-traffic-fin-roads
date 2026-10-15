@@ -6,13 +6,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import cot_utils, digitraffic, weathercam
-from .common import Health, env, env_float, env_list
+from . import __version__, cot_utils, digitraffic, weathercam
+from .common import Health, digitraffic_headers, env, env_float, env_list
 
 logger = logging.getLogger(__name__)
 
@@ -150,7 +151,8 @@ def _points(values: List[Tuple[str, str]]) -> Tuple[Tuple[float, float], ...]:
 
 def cot_signature(event: ET.Element) -> Tuple[Any, ...]:
     """What ATAK shows of a CoT item: type, position, label, remarks, icon,
-    colour and line points. Times are left out, they change every round."""
+    colour, line points and embedded image. Times are left out, they change
+    every round."""
     point = event.find("point")
     detail = event.find("detail")
 
@@ -168,7 +170,15 @@ def cot_signature(event: ET.Element) -> Tuple[Any, ...]:
         attr("usericon", "iconsetpath"),
         attr("color", "argb"),
         _points([tuple(l.get("point", ",").split(",", 1)) for l in links]),  # type: ignore[misc]
+        _image_digest(detail),
     )
+
+
+def _image_digest(detail: Optional[ET.Element]) -> str:
+    """Digest of an embedded image, so a new picture counts as a change."""
+    image = detail.find("image") if detail is not None else None
+    text = "".join((image.text or "").split()) if image is not None else ""
+    return hashlib.sha1(text.encode("ascii", "ignore")).hexdigest() if text else ""
 
 
 def parse_signatures(xml: Any) -> Optional[Dict[str, Tuple[Any, ...]]]:
@@ -190,6 +200,7 @@ class MissionSync:
 
     def __init__(self, s: Settings, ds: Dataset, server: Any, build_package: Any) -> None:
         self.s, self.ds, self.server, self.build_package = s, ds, server, build_package
+        self.thumbnails = weathercam.ThumbnailCache()
 
     async def _create(self) -> None:
         group: Any = self.ds.groups or ""  # a list becomes repeated group=
@@ -255,7 +266,10 @@ class MissionSync:
 
         fc = await digitraffic.fetch_geojson(self.ds.url, self.s.digitraffic_user)
         if self.ds.name == "weathercams":
-            files = weathercam.build_cot_files(fc, self.s.weathercam, self.ds.mission_name)
+            images = await self.thumbnails.refresh(fc, self.s.weathercam, digitraffic_headers(
+                self.s.digitraffic_user, "tak-feeder-traffic-fin-roads", __version__))
+            files = weathercam.build_cot_files(fc, self.s.weathercam, self.ds.mission_name,
+                                               images)
         else:
             candidates = digitraffic.extract_cot_candidates(fc, self.ds.name, self.s.timezone)
             files = build_cot_files(candidates, self.s, self.ds.mission_name)

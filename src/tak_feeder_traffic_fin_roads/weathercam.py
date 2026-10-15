@@ -20,11 +20,15 @@ live response; unknown fields are ignored.
 
 from __future__ import annotations
 
+import asyncio
+import base64
 import logging
+import urllib.error
+import urllib.request
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .common import cot_time, env, env_bool, env_float, env_list, remarks_text
 from .digitraffic import SOURCE_LINE
@@ -41,7 +45,16 @@ class WeathercamSettings:
 
     bbox: Optional[Tuple[float, float, float, float]] = None  # west, south, east, north
     thumbnails: bool = False
-    cot_type: str = "a-n-G"
+    # ATAK draws b-m-p-s-p-loc with its own camcorder icon and b-i-x-i (Quick
+    # Pic) with its photo icon; an embedded image is shown on the b-i-x-i marker.
+    cot_type: str = "b-m-p-s-p-loc"
+    image_cot_type: str = "b-i-x-i"
+    # Stations in this area get the thumbnail of their first camera embedded
+    # in the CoT. None = no embedded images.
+    embed_bbox: Optional[Tuple[float, float, float, float]] = None
+    embed_max: int = 100
+    # Digitraffic allows 60 image requests a minute per IP
+    image_request_gap: float = 1.1
     icon: str = ""
     # Mission items are re-sent only when the station set changes, so the
     # stale time is long; removal from the mission hides a station.
@@ -51,21 +64,31 @@ class WeathercamSettings:
     def from_env(cls) -> "WeathercamSettings":
         """Read WEATHERCAMS_* variables."""
         d = cls()
-        bbox: Optional[Tuple[float, float, float, float]] = None
-        parts = env_list("WEATHERCAMS_BBOX", "")
-        try:
-            if len(parts) == 4:
-                west, south, east, north = (float(p) for p in parts)
-                bbox = (west, south, east, north)
-        except ValueError:
-            LOG.warning("WEATHERCAMS_BBOX=%s is not west,south,east,north; using all", parts)
         return cls(
-            bbox=bbox,
+            bbox=_bbox_env("WEATHERCAMS_BBOX"),
+            image_cot_type=env("WEATHERCAMS_IMAGE_COT_TYPE", d.image_cot_type),
+            embed_bbox=_bbox_env("WEATHERCAMS_EMBED_BBOX"),
+            embed_max=int(env_float("WEATHERCAMS_EMBED_MAX", d.embed_max)),
             thumbnails=env_bool("WEATHERCAMS_THUMBNAILS", d.thumbnails),
             cot_type=env("WEATHERCAMS_COT_TYPE", d.cot_type),
             icon=env("WEATHERCAMS_ICON", d.icon),
             stale_days=env_float("WEATHERCAMS_STALE_DAYS", d.stale_days),
         )
+
+
+def _bbox_env(name: str) -> Optional[Tuple[float, float, float, float]]:
+    """west,south,east,north from the environment, None if unset or invalid."""
+    parts = env_list(name, "")
+    if not parts:
+        return None
+    try:
+        if len(parts) == 4:
+            west, south, east, north = (float(p) for p in parts)
+            return (west, south, east, north)
+    except ValueError:
+        pass
+    LOG.warning("%s=%s is not west,south,east,north; ignored", name, ",".join(parts))
+    return None
 
 
 def _in_bbox(lat: float, lon: float, bbox: Optional[Tuple[float, float, float, float]]) -> bool:
@@ -127,11 +150,12 @@ def station_remarks(station: Dict[str, Any], ws: WeathercamSettings) -> str:
 
 
 def station_cot(station: Dict[str, Any], ws: WeathercamSettings, mission_name: str,
-                how: str = "h-e", now: Optional[datetime] = None) -> bytes:
-    """Mission item for one camera station."""
+                how: str = "h-e", now: Optional[datetime] = None,
+                image: Optional[str] = None) -> bytes:
+    """Mission item for one camera station; image = base64 JPEG to embed."""
     t = now or datetime.now(timezone.utc)
     root = ET.Element("event", {
-        "version": "2.0", "type": ws.cot_type, "uid": f"digitraffic.weathercam.{station['id']}",
+        "version": "2.0", "type": ws.image_cot_type if image else ws.cot_type, "uid": f"digitraffic.weathercam.{station['id']}",
         "how": how, "time": cot_time(t), "start": cot_time(t),
         "stale": cot_time(t + timedelta(days=ws.stale_days)),
     })
@@ -145,19 +169,87 @@ def station_cot(station: Dict[str, Any], ws: WeathercamSettings, mission_name: s
     if ws.icon:
         ET.SubElement(detail, "usericon", {"iconsetpath": ws.icon})
     ET.SubElement(detail, "remarks").text = station_remarks(station, ws)
+    if image:
+        # ATAK's ImageDetailHandler stores this and shows it on the marker
+        ET.SubElement(detail, "image", {"mime": "image/jpeg"}).text = image
     return ET.tostring(root)
 
 
-def build_cot_files(fc: Dict[str, Any], ws: WeathercamSettings,
-                    mission_name: str) -> Dict[str, bytes | str]:
-    """Mission items keyed by UID."""
+def build_cot_files(fc: Dict[str, Any], ws: WeathercamSettings, mission_name: str,
+                    images: Optional[Mapping[str, str]] = None) -> Dict[str, bytes | str]:
+    """Mission items keyed by UID. images: station id -> base64 thumbnail."""
     files: Dict[str, bytes | str] = {}
     stations = extract_stations(fc, ws)
     for station in stations:
-        files[f"digitraffic.weathercam.{station['id']}"] = station_cot(station, ws, mission_name)
+        files[f"digitraffic.weathercam.{station['id']}"] = station_cot(
+            station, ws, mission_name, image=(images or {}).get(station["id"]))
     features = len(fc.get("features", []) or [])
     LOG.info("%s: %d of %d stations, %d cameras", mission_name, len(stations), features,
              sum(len(s["presets"]) for s in stations))
     if features and not stations:
         LOG.warning("%s: no station has usable presets; check the property names", mission_name)
     return files
+
+
+def _get_image(url: str, headers: Mapping[str, str], timeout: float = 30.0
+               ) -> Tuple[int, str, bytes]:
+    """GET an image: (status, ETag, body); 304 when If-None-Match matches."""
+    req = urllib.request.Request(url, headers=dict(headers))
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+            return resp.status, resp.headers.get("ETag", ""), resp.read()
+    except urllib.error.HTTPError as exc:
+        if exc.code == 304:
+            return 304, exc.headers.get("ETag", "") if exc.headers else "", b""
+        raise
+
+
+class ThumbnailCache:
+    """Latest thumbnail of each embedded station, refreshed with ETags."""
+
+    def __init__(self, get: Any = _get_image, sleep: Any = asyncio.sleep) -> None:
+        self._get, self._sleep = get, sleep
+        self.images: Dict[str, str] = {}  # station id -> base64
+        self._etags: Dict[str, str] = {}
+
+    def embedded(self, fc: Dict[str, Any], ws: WeathercamSettings) -> List[Dict[str, Any]]:
+        """Stations whose thumbnail is embedded."""
+        if ws.embed_bbox is None:
+            return []
+        stations = [s for s in extract_stations(fc, ws)
+                    if _in_bbox(s["lat"], s["lon"], ws.embed_bbox)]
+        if len(stations) > ws.embed_max:
+            LOG.warning("%d stations in WEATHERCAMS_EMBED_BBOX, embedding the first %d "
+                        "(WEATHERCAMS_EMBED_MAX)", len(stations), ws.embed_max)
+        return stations[:ws.embed_max]
+
+    async def refresh(self, fc: Dict[str, Any], ws: WeathercamSettings,
+                      headers: Mapping[str, str]) -> Dict[str, str]:
+        """Fetch changed thumbnails (first camera of each station), at most
+        one request per image_request_gap seconds. Returns the images."""
+        stations = self.embedded(fc, ws)
+        wanted = {s["id"] for s in stations}
+        for sid in set(self.images) - wanted:
+            self.images.pop(sid, None)
+            self._etags.pop(sid, None)
+        fetched = 0
+        for i, station in enumerate(stations):
+            if i:
+                await self._sleep(ws.image_request_gap)
+            url = IMAGE_URL.format(preset=station["presets"][0]["id"]) + "?thumbnail=true"
+            hdrs = dict(headers)
+            if station["id"] in self._etags:
+                hdrs["If-None-Match"] = self._etags[station["id"]]
+            try:
+                status, etag, body = await asyncio.to_thread(self._get, url, hdrs)
+            except Exception as exc:  # noqa: BLE001  pylint: disable=broad-exception-caught
+                LOG.warning("thumbnail %s: %s", url, exc)
+                continue
+            if status == 200 and body:
+                self.images[station["id"]] = base64.b64encode(body).decode("ascii")
+                if etag:
+                    self._etags[station["id"]] = etag
+                fetched += 1
+        if stations:
+            LOG.info("thumbnails: %d embedded, %d new", len(self.images), fetched)
+        return dict(self.images)

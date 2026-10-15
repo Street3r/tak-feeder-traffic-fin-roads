@@ -61,8 +61,17 @@ fetched every `WEATHERCAMS_UPDATE_INTERVAL` seconds, and the mission changes
 only when stations come or go. UID `digitraffic.weathercam.<stationId>`,
 tags `#weather #weathercam`.
 
-Not yet tested against the live API or in ATAK: the station property names
-and whether ATAK opens the links in the remarks.
+Markers use CoT type `b-m-p-s-p-loc`, which ATAK draws with its own
+camcorder icon. Stations inside `WEATHERCAMS_EMBED_BBOX` also carry the
+thumbnail of their first camera in the CoT (`<image mime="image/jpeg">`,
+base64), as type `b-i-x-i` (ATAK's Quick Pic icon); ATAK shows the picture
+on the marker. Thumbnails are fetched with ETags, at most one request per
+1.1 s (Digitraffic allows 60 image requests a minute), and a new picture
+re-uploads only that station. Every embedded picture goes to every
+subscribed device, so keep the area small.
+
+Tested on a TAK 5.8 test server: 812 stations, 2266 cameras. Not yet
+tested: embedded images in ATAK and opening the links in the remarks.
 
 ## What it sends
 
@@ -93,7 +102,10 @@ and whether ATAK opens the links in the remarks.
 | `WEATHERCAMS_UPDATE_INTERVAL` | `600` | Seconds between weather camera syncs (`<DATASET>_UPDATE_INTERVAL` works for every dataset) |
 | `WEATHERCAMS_BBOX` | all of Finland | Area `west,south,east,north`, e.g. `22,60,26,62` |
 | `WEATHERCAMS_THUMBNAILS` | `0` | `1` = link the small images (`?thumbnail=true`) |
-| `WEATHERCAMS_COT_TYPE` / `WEATHERCAMS_ICON` | `a-n-G` / none | CoT type and ATAK iconset path of the camera markers |
+| `WEATHERCAMS_EMBED_BBOX` | none | Area `west,south,east,north` whose stations get an embedded thumbnail; empty = none |
+| `WEATHERCAMS_EMBED_MAX` | `100` | Most stations with an embedded thumbnail |
+| `WEATHERCAMS_COT_TYPE` / `WEATHERCAMS_IMAGE_COT_TYPE` | `b-m-p-s-p-loc` / `b-i-x-i` | CoT type without / with an embedded thumbnail |
+| `WEATHERCAMS_ICON` | none | Optional ATAK iconset path instead of the type's icon |
 | `WEATHERCAMS_STALE_DAYS` | `365` | Stale time; removal from the mission hides a station |
 | `TIMEZONE` | `Europe/Helsinki` | Time zone of the validity times in the remarks |
 | `UPDATE_INTERVAL` | `60` | Seconds between syncs of one dataset |

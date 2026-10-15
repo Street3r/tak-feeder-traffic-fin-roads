@@ -152,6 +152,12 @@ def build_cot_files(fc: Dict[str, Any], ws: WeathercamSettings,
                     mission_name: str) -> Dict[str, bytes | str]:
     """Mission items keyed by UID."""
     files: Dict[str, bytes | str] = {}
-    for station in extract_stations(fc, ws):
+    stations = extract_stations(fc, ws)
+    for station in stations:
         files[f"digitraffic.weathercam.{station['id']}"] = station_cot(station, ws, mission_name)
+    features = len(fc.get("features", []) or [])
+    LOG.info("%s: %d of %d stations, %d cameras", mission_name, len(stations), features,
+             sum(len(s["presets"]) for s in stations))
+    if features and not stations:
+        LOG.warning("%s: no station has usable presets; check the property names", mission_name)
     return files

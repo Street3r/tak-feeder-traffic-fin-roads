@@ -102,14 +102,14 @@ class EmbedTest(unittest.TestCase):
 class SettingsTest(unittest.TestCase):
     def test_env(self) -> None:
         env = {"DATASETS": "traffic-announcements,weathercams",
-               "WEATHERCAMS_MISSION_GROUP": "WEATHERCAM,WEATHER,TRAFFIC",
+               "WEATHERCAMS_MISSION_GROUP": "WEATHERCAM",
                "WEATHERCAMS_BBOX": "19,59,32,71", "WEATHERCAMS_THUMBNAILS": "1",
                "WEATHERCAMS_EMBED_BBOX": "24.5,60.1,25.3,60.4"}
         with mock.patch.dict("os.environ", env, clear=True):
             s = feeder.Settings.from_env()
         cams = s.datasets[1]
         self.assertEqual((cams.name, cams.mission_name, cams.groups, cams.url, cams.interval),
-                         ("weathercams", "WeatherCamsFin", ["WEATHERCAM", "WEATHER", "TRAFFIC"],
+                         ("weathercams", "WeatherCamsFin", ["WEATHERCAM"],
                           weathercam.STATIONS_URL, 600.0))
         self.assertEqual(s.datasets[0].interval, 0.0)
         self.assertEqual(s.weathercam.bbox, (19.0, 59.0, 32.0, 71.0))
@@ -131,13 +131,13 @@ class SyncTest(unittest.TestCase):
         srv.mission.add_mission_package = mock.AsyncMock(return_value=(200, {}))
         package = mock.Mock(return_value=b"zip")
         ds = feeder.Dataset("weathercams", weathercam.STATIONS_URL, "WeatherCamsFin",
-                            ["WEATHERCAM", "WEATHER", "TRAFFIC"])
+                            ["WEATHERCAM"])
         sync = feeder.MissionSync(feeder.Settings(api_host="tak"), ds, srv, package)
         body = json.dumps({"features": [station("C1")]}).encode()
         with mock.patch.object(digitraffic, "fetch", mock.AsyncMock(return_value=body)):
             self.assertTrue(asyncio.run(sync.run_once()))
         self.assertEqual(set(package.call_args.kwargs["cot_files"]), {"digitraffic.weathercam.C1"})
-        self.assertEqual(package.call_args.kwargs["groups"], ["WEATHERCAM", "WEATHER", "TRAFFIC"])
+        self.assertEqual(package.call_args.kwargs["groups"], ["WEATHERCAM"])
 
 
 if __name__ == "__main__":

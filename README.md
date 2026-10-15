@@ -47,9 +47,9 @@ delete the mission so the feeder recreates it.
 ### Weather cameras (draft)
 
 `weathercams` puts one marker per Digitraffic weather camera station in its
-own mission, so it can have its own group. To show the cameras to members
-of `WEATHERCAM`, `WEATHER` and `TRAFFIC` (no nested groups needed):
-`WEATHERCAMS_MISSION_GROUP=WEATHERCAM,WEATHER,TRAFFIC`. The remarks list each camera
+own mission, so it can have its own group, for example
+`WEATHERCAMS_MISSION_GROUP=WEATHERCAM` (a comma-separated list shows the
+cameras to several groups without nested groups). The remarks list each camera
 direction with a link to its latest image
 (`https://weathercam.digitraffic.fi/<presetId>.jpg`); the link always
 serves the newest picture (updated about every 10 minutes), so the TAK

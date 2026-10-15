@@ -10,7 +10,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from . import cot_utils, digitraffic
+from . import cot_utils, digitraffic, weathercam
 from .common import Health, env, env_float, env_list
 
 logger = logging.getLogger(__name__)
@@ -20,6 +20,12 @@ DEFAULT_MISSIONS = {
     "roadworks": "TrafficFinRoadworks",
     "weight-restrictions": "TrafficFinWeightRestrictions",
     "exempted-transports": "TrafficFinExemptedTransports",
+    "weathercams": "WeatherCamsFin",
+}
+
+# Datasets that are not Digitraffic traffic messages: URL and default interval (s)
+OTHER_SOURCES = {
+    "weathercams": (weathercam.STATIONS_URL, 600.0),
 }
 
 
@@ -32,6 +38,7 @@ class Dataset:
     mission_name: str
     groups: List[str] = field(default_factory=list)
     token: str = ""
+    interval: float = 0.0  # 0 = UPDATE_INTERVAL
 
 
 @dataclass
@@ -51,6 +58,8 @@ class Settings:
     iconset_path: str = "6d781afb-89a6-4c07-b2b9-a89748b6a38f/Transport/caution.png"
     timezone: str = "Europe/Helsinki"
     datasets: List[Dataset] = field(default_factory=list)
+    weathercam: weathercam.WeathercamSettings = field(
+        default_factory=weathercam.WeathercamSettings)
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -71,11 +80,13 @@ class Settings:
                     env("MISSION_TOKEN", "")))
             else:
                 prefix = name.upper().replace("-", "_")
+                url, interval = OTHER_SOURCES.get(name, (f"{digitraffic.BASE_URL}/{name}", 0.0))
                 datasets.append(Dataset(
-                    name, f"{digitraffic.BASE_URL}/{name}",
+                    name, url,
                     env(f"{prefix}_MISSION_NAME", DEFAULT_MISSIONS[name]),
                     env_list(f"{prefix}_MISSION_GROUP", ""),
-                    env(f"{prefix}_MISSION_TOKEN", "")))
+                    env(f"{prefix}_MISSION_TOKEN", ""),
+                    env_float(f"{prefix}_UPDATE_INTERVAL", interval)))
         return cls(
             api_host=env("API_HOST", ""),
             cert=env("PYTAK_TLS_CLIENT_CERT", ""),
@@ -90,6 +101,7 @@ class Settings:
             iconset_path=env("ICONSET_PATH", d.iconset_path),
             timezone=env("TIMEZONE", d.timezone),
             datasets=datasets,
+            weathercam=weathercam.WeathercamSettings.from_env(),
         )
 
 
@@ -168,8 +180,11 @@ class MissionSync:
             raise RuntimeError(f"cannot get mission {self.ds.mission_name}: HTTP {status}")
 
         fc = await digitraffic.fetch_geojson(self.ds.url, self.s.digitraffic_user)
-        candidates = digitraffic.extract_cot_candidates(fc, self.ds.name, self.s.timezone)
-        files = build_cot_files(candidates, self.s, self.ds.mission_name)
+        if self.ds.name == "weathercams":
+            files = weathercam.build_cot_files(fc, self.s.weathercam, self.ds.mission_name)
+        else:
+            candidates = digitraffic.extract_cot_candidates(fc, self.ds.name, self.s.timezone)
+            files = build_cot_files(candidates, self.s, self.ds.mission_name)
         wanted = set(files)
         present = {u.get("data") for u in mission["data"][0].get("uids", [])
                    if isinstance(u, dict)}
@@ -212,7 +227,7 @@ async def run(s: Settings, server: Any, build_package: Any,
                     health.ok()
                 if uploaded:
                     await asyncio.sleep(30)  # ATAK DataSync needs time (upstream note)
-                next_run[sync.ds.name] = loop.time() + s.update_interval
+                next_run[sync.ds.name] = loop.time() + (sync.ds.interval or s.update_interval)
             except Exception as exc:  # noqa: BLE001  pylint: disable=broad-exception-caught
                 logger.warning("%s: %s; retrying in %.0f s", sync.ds.mission_name, exc,
                                s.retry_interval)

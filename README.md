@@ -24,6 +24,7 @@ by Stefan Gofferje.
 | `roadworks` | road works with work types and restrictions | `TrafficFinRoadworks` | `Roadwork` |
 | `weight-restrictions` | weight limits (e.g. bridges) | `TrafficFinWeightRestrictions` | `Weight limit` |
 | `exempted-transports` | oversize transports | `TrafficFinExemptedTransports` | `Exempted transport` |
+| `weathercams` | weather cameras, links to the latest images | `WeatherCamsFin` | `CAM <station>` |
 
 ### Groups
 
@@ -42,6 +43,25 @@ A user who activates only `CONSTRUCTION` in Channels sees the road works; a
 member of `TRAFFIC` sees all three missions. The groups apply when a mission
 is created. For an existing mission change them in the TAK admin UI, or
 delete the mission so the feeder recreates it.
+
+### Weather cameras (draft)
+
+`weathercams` puts one marker per Digitraffic weather camera station in its
+own mission, so it can have its own group, e.g.
+`WEATHERCAMS_MISSION_GROUP=WEATHER-CAMERAS`. The remarks list each camera
+direction with a link to its latest image
+(`https://weathercam.digitraffic.fi/<presetId>.jpg`); the link always
+serves the newest picture (updated about every 10 minutes), so the TAK
+server carries no images and ATAK loads one only when the user opens it.
+The device needs internet access for that.
+
+Only stations and directions in collection are sent. The station list is
+fetched every `WEATHERCAMS_UPDATE_INTERVAL` seconds, and the mission changes
+only when stations come or go. UID `digitraffic.weathercam.<stationId>`,
+tags `#weather #weathercam`.
+
+Not yet tested against the live API or in ATAK: the station property names
+and whether ATAK opens the links in the remarks.
 
 ## What it sends
 
@@ -69,6 +89,11 @@ delete the mission so the feeder recreates it.
 | `MY_UID` | `roads.0001` | Creator UID |
 | `COT_TYPE` / `COT_TYPE_LINE` / `COT_HOW` | `a-n-G` / `u-d-f` / `h-e` | CoT types |
 | `ICONSET_PATH` | caution icon | Default icon |
+| `WEATHERCAMS_UPDATE_INTERVAL` | `600` | Seconds between weather camera syncs (`<DATASET>_UPDATE_INTERVAL` works for every dataset) |
+| `WEATHERCAMS_BBOX` | all of Finland | Area `west,south,east,north`, e.g. `22,60,26,62` |
+| `WEATHERCAMS_THUMBNAILS` | `0` | `1` = link the small images (`?thumbnail=true`) |
+| `WEATHERCAMS_COT_TYPE` / `WEATHERCAMS_ICON` | `a-n-G` / none | CoT type and ATAK iconset path of the camera markers |
+| `WEATHERCAMS_STALE_DAYS` | `365` | Stale time; removal from the mission hides a station |
 | `TIMEZONE` | `Europe/Helsinki` | Time zone of the validity times in the remarks |
 | `UPDATE_INTERVAL` | `60` | Seconds between syncs of one dataset |
 | `RETRY_INTERVAL` | `300` | Wait after a failed sync |
@@ -117,6 +142,10 @@ Changes in this fork (Street3r):
     mission setup failures are retried instead of ending the feeder.
   - Old variable names still work; python-takserver-api pinned to a commit;
     health check; unprivileged container; tests and CI.
+
+- 2026-10-15
+  - Draft: Digitraffic weather cameras as the `weathercams` dataset in their
+    own mission and group.
 
 ## License
 

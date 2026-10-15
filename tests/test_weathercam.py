@@ -60,7 +60,7 @@ class EmbedTest(unittest.TestCase):
         files = weathercam.build_cot_files(fc, weathercam.WeathercamSettings(), "M",
                                            {"C1": "QUJD"})
         ev = ET.fromstring(files["digitraffic.weathercam.C1"])
-        self.assertEqual(ev.get("type"), "b-i-x-i")
+        self.assertEqual(ev.get("type"), "b-m-p-s-p-loc")
         self.assertEqual(ev.find("detail/image").get("mime"), "image/jpeg")
         self.assertEqual(ev.find("detail/image").text, "QUJD")
         other = ET.fromstring(files["digitraffic.weathercam.C2"])

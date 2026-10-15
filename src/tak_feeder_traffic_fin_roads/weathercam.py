@@ -45,10 +45,9 @@ class WeathercamSettings:
 
     bbox: Optional[Tuple[float, float, float, float]] = None  # west, south, east, north
     thumbnails: bool = False
-    # ATAK draws b-m-p-s-p-loc with its own camcorder icon and b-i-x-i (Quick
-    # Pic) with its photo icon; an embedded image is shown on the b-i-x-i marker.
+    # Sensor point; ATAK draws it with its own sensor (camcorder) icon.
+    # Quick Pic (b-i-x-i) is left for photos taken by users.
     cot_type: str = "b-m-p-s-p-loc"
-    image_cot_type: str = "b-i-x-i"
     # Stations in this area get the thumbnail of their first camera embedded
     # in the CoT. None = no embedded images.
     embed_bbox: Optional[Tuple[float, float, float, float]] = None
@@ -66,7 +65,6 @@ class WeathercamSettings:
         d = cls()
         return cls(
             bbox=_bbox_env("WEATHERCAMS_BBOX"),
-            image_cot_type=env("WEATHERCAMS_IMAGE_COT_TYPE", d.image_cot_type),
             embed_bbox=_bbox_env("WEATHERCAMS_EMBED_BBOX"),
             embed_max=int(env_float("WEATHERCAMS_EMBED_MAX", d.embed_max)),
             thumbnails=env_bool("WEATHERCAMS_THUMBNAILS", d.thumbnails),
@@ -155,7 +153,7 @@ def station_cot(station: Dict[str, Any], ws: WeathercamSettings, mission_name: s
     """Mission item for one camera station; image = base64 JPEG to embed."""
     t = now or datetime.now(timezone.utc)
     root = ET.Element("event", {
-        "version": "2.0", "type": ws.image_cot_type if image else ws.cot_type, "uid": f"digitraffic.weathercam.{station['id']}",
+        "version": "2.0", "type": ws.cot_type, "uid": f"digitraffic.weathercam.{station['id']}",
         "how": how, "time": cot_time(t), "start": cot_time(t),
         "stale": cot_time(t + timedelta(days=ws.stale_days)),
     })

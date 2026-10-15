@@ -161,6 +161,9 @@ Changes in this fork (Street3r):
   - Each round compares the items with what the mission already stores and
     uploads only new or changed ones, so an updated message (new text or
     times, same id) reaches ATAK. Unchanged items are not sent again.
+  - Every event of a send round reaches TAK. pytak's send queue holds 100
+    events and dropped the oldest when full, so rounds of more than 100
+    lost the rest.
 
 - 2026-10-15
   - Draft: Digitraffic weather cameras as the `weathercams` dataset in their

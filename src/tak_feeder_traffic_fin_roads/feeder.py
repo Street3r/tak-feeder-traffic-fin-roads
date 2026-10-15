@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from . import cot_utils, digitraffic
 from .common import Health, env, env_float, env_list
@@ -125,6 +126,53 @@ def build_cot_files(candidates: List[Dict[str, Any]], s: Settings,
     return files
 
 
+def _points(values: List[Tuple[str, str]]) -> Tuple[Tuple[float, float], ...]:
+    out = []
+    for lat, lon in values:
+        try:
+            out.append((round(float(lat), 5), round(float(lon), 5)))
+        except ValueError:
+            continue
+    return tuple(out)
+
+
+def cot_signature(event: ET.Element) -> Tuple[Any, ...]:
+    """What ATAK shows of a CoT item: type, position, label, remarks, icon,
+    colour and line points. Times are left out, they change every round."""
+    point = event.find("point")
+    detail = event.find("detail")
+
+    def attr(path: str, name: str) -> str:
+        el = detail.find(path) if detail is not None else None
+        return el.get(name, "") if el is not None else ""
+
+    remarks = detail.find("remarks") if detail is not None else None
+    links = detail.findall("link") if detail is not None else []
+    return (
+        event.get("type", ""),
+        _points([(point.get("lat", ""), point.get("lon", ""))]) if point is not None else (),
+        attr("contact", "callsign"),
+        (remarks.text or "").strip() if remarks is not None else "",
+        attr("usericon", "iconsetpath"),
+        attr("color", "argb"),
+        _points([tuple(l.get("point", ",").split(",", 1)) for l in links]),  # type: ignore[misc]
+    )
+
+
+def parse_signatures(xml: Any) -> Optional[Dict[str, Tuple[Any, ...]]]:
+    """uid -> signature of the CoT items TAK stores for a mission, None if the
+    response cannot be read."""
+    if isinstance(xml, bytes):
+        xml = xml.decode("utf-8", "replace")
+    if not isinstance(xml, str) or not xml.strip():
+        return None
+    try:
+        root = ET.fromstring(xml.strip())
+    except ET.ParseError:
+        return None
+    return {e.get("uid", ""): cot_signature(e) for e in root.iter("event")}
+
+
 class MissionSync:
     """Keeps one mission in sync with one dataset."""
 
@@ -157,6 +205,32 @@ class MissionSync:
         else:
             raise RuntimeError(f"subscription to {self.ds.mission_name} failed: HTTP {status}")
 
+    async def _changed(self, files: Dict[str, Any], uids_differ: bool) -> Dict[str, Any]:
+        """Items that are new or whose content differs from what TAK stores.
+        If the stored items cannot be read, everything is sent when the set of
+        items changed (the old behaviour)."""
+        if not files:
+            return {}
+        stored: Optional[Dict[str, Tuple[Any, ...]]] = None
+        try:
+            status, body = await self.server.mission.get_mission_cot(self.ds.mission_name)
+            if status == 200:
+                stored = parse_signatures(body)
+        except Exception as exc:  # noqa: BLE001  pylint: disable=broad-exception-caught
+            logger.debug("%s: cannot read stored items: %s", self.ds.mission_name, exc)
+        if stored is None:
+            logger.debug("%s: stored items not readable", self.ds.mission_name)
+            return dict(files) if uids_differ else {}
+        changed = {}
+        for uid, cot in files.items():
+            try:
+                sig = cot_signature(ET.fromstring(cot))
+            except ET.ParseError:
+                sig = None
+            if stored.get(uid) != sig:
+                changed[uid] = cot
+        return changed
+
     async def run_once(self) -> bool:
         """One round. True if a package was uploaded."""
         await self._subscribe()
@@ -180,14 +254,16 @@ class MissionSync:
             if s != 200:
                 logger.warning("Could not remove %s: HTTP %s %s", uid, s, r)
             await asyncio.sleep(3)
-        if wanted == present or not files:
+        upload = await self._changed(files, wanted != present)
+        if not upload:
             logger.info("%s: %d items, no changes", self.ds.mission_name, len(wanted))
             return False
         package = self.build_package(
             name=self.ds.mission_name, mission_name=self.ds.mission_name,
             mission_server=f"{self.s.api_host}:8443:ssl", creator_uid=self.s.my_uid,
-            cot_files=files, groups=self.ds.groups or None)
-        logger.info("%s: uploading %d items", self.ds.mission_name, len(files))
+            cot_files=upload, groups=self.ds.groups or None)
+        logger.info("%s: uploading %d of %d items", self.ds.mission_name,
+                    len(upload), len(files))
         s, r = await self.server.mission.add_mission_package(
             self.ds.mission_name, self.s.my_uid, self.ds.token, package)
         if s != 200:

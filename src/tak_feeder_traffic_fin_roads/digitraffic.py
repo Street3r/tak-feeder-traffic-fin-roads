@@ -28,7 +28,9 @@ Response is a GeoJSON FeatureCollection:
 # Copyright Stefan Gofferje; Copyright (C) 2026 Street3r (datasets, English labels)
 
 import json
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 from . import __version__
 from .common import digitraffic_headers, fetch, remarks_text
@@ -83,6 +85,19 @@ def _feature_text(feature: Dict[str, Any]) -> str:
     return name
 
 
+def local_time(value: Optional[str], tz: ZoneInfo) -> Optional[str]:
+    """Digitraffic ISO-8601 time (UTC) as local "dd.mm. HH:MM"; unparsable as is."""
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return str(value)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(tz).strftime("%d.%m. %H:%M")
+
+
 def _roadwork_names(ann: Dict[str, Any]) -> List[str]:
     """Work types and restrictions of road work phases (names vary by phase)."""
     names: List[str] = []
@@ -100,13 +115,15 @@ def _roadwork_names(ann: Dict[str, Any]) -> List[str]:
 
 
 def extract_cot_candidates(
-    feature_collection: Dict[str, Any], dataset: str = "traffic-announcements"
+    feature_collection: Dict[str, Any], dataset: str = "traffic-announcements",
+    tz: str = "Europe/Helsinki",
 ) -> List[Dict[str, Any]]:
     """
     Normalized candidates for CoT conversion from a FeatureCollection.
     Each dict holds: uid, geometry, centroid, callsign, remarks, times etc.
     """
     fallback_label, dataset_tag = DATASETS.get(dataset, ("Announcement", "traffic"))
+    zone = ZoneInfo(tz)
     candidates: List[Dict[str, Any]] = []
     for feat in feature_collection.get("features", []) or []:
         props: Dict[str, Any] = feat.get("properties", {}) or {}
@@ -156,7 +173,8 @@ def extract_cot_candidates(
             f"Road: {road_name}" if road_name else None,
             f"Details: {features_str}" if features_str else None,
             comment.strip() if comment else None,
-            f"Valid: {start_time or '?'} – {end_time or 'until further notice'}"
+            f"Valid: {local_time(start_time, zone) or '?'} – "
+            f"{local_time(end_time, zone) or 'until further notice'}"
             if start_time or end_time else None,
             f"Sender: {sender}" if sender else None,
         ]

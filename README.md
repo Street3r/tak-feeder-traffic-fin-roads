@@ -69,6 +69,7 @@ delete the mission so the feeder recreates it.
 | `MY_UID` | `roads.0001` | Creator UID |
 | `COT_TYPE` / `COT_TYPE_LINE` / `COT_HOW` | `a-n-G` / `u-d-f` / `h-e` | CoT types |
 | `ICONSET_PATH` | caution icon | Default icon |
+| `TIMEZONE` | `Europe/Helsinki` | Time zone of the validity times in the remarks |
 | `UPDATE_INTERVAL` | `60` | Seconds between syncs of one dataset |
 | `RETRY_INTERVAL` | `300` | Wait after a failed sync |
 | `HEALTH_MAX_ERRORS` | `3` | Failed syncs in a row before the container is unhealthy |

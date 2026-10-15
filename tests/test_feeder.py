@@ -39,6 +39,16 @@ class ExtractTest(unittest.TestCase):
         self.assertIn("Sender: Fintraffic Tieliikennekeskus", c["remarks"])
         self.assertIn("Source: Fintraffic / digitraffic.fi, CC BY 4.0", c["remarks"])
         self.assertTrue(c["remarks"].endswith("#traffic #announcement #accident"))
+        # 08:00Z is 11:00 in Finland in summer time
+        self.assertIn("Valid: 13.10. 11:00 – until further notice", c["remarks"])
+
+    def test_valid_local_time(self) -> None:
+        f = feature("GUID2", "TRAFFIC_ANNOUNCEMENT", [{"name": "Onnettomuus"}])
+        f["properties"]["announcements"][0]["timeAndDuration"]["endTime"] = "2026-12-01T22:30:00Z"
+        (c,) = digitraffic.extract_cot_candidates({"features": [f]})
+        self.assertIn("Valid: 13.10. 11:00 – 02.12. 00:30", c["remarks"])  # winter time +2
+        (c,) = digitraffic.extract_cot_candidates({"features": [f]}, tz="UTC")
+        self.assertIn("Valid: 13.10. 08:00 – 01.12. 22:30", c["remarks"])
 
     def test_roadwork(self) -> None:
         phase = {"workTypes": [{"type": "BRIDGE", "description": "Siltatyö"}],

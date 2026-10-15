@@ -49,6 +49,7 @@ class Settings:
     cot_type_line: str = "u-d-f"
     cot_how: str = "h-e"
     iconset_path: str = "6d781afb-89a6-4c07-b2b9-a89748b6a38f/Transport/caution.png"
+    timezone: str = "Europe/Helsinki"
     datasets: List[Dataset] = field(default_factory=list)
 
     @classmethod
@@ -87,6 +88,7 @@ class Settings:
             cot_type_line=env("COT_TYPE_LINE", d.cot_type_line),
             cot_how=env("COT_HOW", d.cot_how),
             iconset_path=env("ICONSET_PATH", d.iconset_path),
+            timezone=env("TIMEZONE", d.timezone),
             datasets=datasets,
         )
 
@@ -166,7 +168,7 @@ class MissionSync:
             raise RuntimeError(f"cannot get mission {self.ds.mission_name}: HTTP {status}")
 
         fc = await digitraffic.fetch_geojson(self.ds.url, self.s.digitraffic_user)
-        candidates = digitraffic.extract_cot_candidates(fc, self.ds.name)
+        candidates = digitraffic.extract_cot_candidates(fc, self.ds.name, self.s.timezone)
         files = build_cot_files(candidates, self.s, self.ds.mission_name)
         wanted = set(files)
         present = {u.get("data") for u in mission["data"][0].get("uids", [])

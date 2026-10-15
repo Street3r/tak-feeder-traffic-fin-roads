@@ -98,6 +98,26 @@ def local_time(value: Optional[str], tz: ZoneInfo) -> Optional[str]:
     return dt.astimezone(tz).strftime("%d.%m. %H:%M")
 
 
+def _local_dt(value: Optional[str], tz: ZoneInfo) -> Optional[datetime]:
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(tz)
+
+
+def valid_range(start: Optional[str], end: Optional[str], tz: ZoneInfo) -> str:
+    """Validity as local time: "15.10. 20:00–23:30" within one day,
+    otherwise "15.10. 23:00 – 16.10. 05:00"."""
+    if start and end:
+        s, e = _local_dt(start, tz), _local_dt(end, tz)
+        if s and e and s.date() == e.date():
+            return f"{s:%d.%m. %H:%M}–{e:%H:%M}"
+    return f"{local_time(start, tz) or '?'} – {local_time(end, tz) or 'until further notice'}"
+
+
 def _roadwork_names(ann: Dict[str, Any]) -> List[str]:
     """Work types and restrictions of road work phases (names vary by phase)."""
     names: List[str] = []
@@ -173,8 +193,7 @@ def extract_cot_candidates(
             f"Road: {road_name}" if road_name else None,
             f"Details: {features_str}" if features_str else None,
             comment.strip() if comment else None,
-            f"Valid: {local_time(start_time, zone) or '?'} – "
-            f"{local_time(end_time, zone) or 'until further notice'}"
+            f"Valid: {valid_range(start_time, end_time, zone)}"
             if start_time or end_time else None,
             f"Sender: {sender}" if sender else None,
         ]

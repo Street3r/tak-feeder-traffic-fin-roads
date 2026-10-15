@@ -143,6 +143,12 @@ Changes in this fork (Street3r):
     mission setup failures are retried instead of ending the feeder.
   - Old variable names still work; python-takserver-api pinned to a commit;
     health check; unprivileged container; tests and CI.
+- 2026-10-15
+  - Validity in local time (`TIMEZONE`), shorter within one day:
+    `15.10. 20:00–23:30`, otherwise `15.10. 23:00 – 16.10. 05:00`.
+  - Each round compares the items with what the mission already stores and
+    uploads only new or changed ones, so an updated message (new text or
+    times, same id) reaches ATAK. Unchanged items are not sent again.
 
 - 2026-10-15
   - Draft: Digitraffic weather cameras as the `weathercams` dataset in their

@@ -21,8 +21,10 @@ live response; unknown fields are ignored.
 from __future__ import annotations
 
 import asyncio
-import base64
+import hashlib
+import json
 import logging
+import urllib.parse
 import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -37,6 +39,9 @@ LOG = logging.getLogger(__name__)
 
 STATIONS_URL = "https://tie.digitraffic.fi/api/weathercam/v1/stations"
 IMAGE_URL = "https://weathercam.digitraffic.fi/{preset}.jpg"
+# Name of a station's thumbnail in the mission; the feeder only touches files
+# with this prefix
+FILE_PREFIX = "weathercam_"
 
 
 @dataclass
@@ -48,10 +53,13 @@ class WeathercamSettings:
     # Sensor point; ATAK draws it with its own sensor (camcorder) icon.
     # Quick Pic (b-i-x-i) is left for photos taken by users.
     cot_type: str = "b-m-p-s-p-loc"
-    # Stations in this area get the thumbnail of their first camera embedded
-    # in the CoT. None = no embedded images.
-    embed_bbox: Optional[Tuple[float, float, float, float]] = None
-    embed_max: int = 100
+    # Stations in this area get the thumbnail of their first camera as a
+    # mission file attached to the marker. None = no images.
+    image_bbox: Optional[Tuple[float, float, float, float]] = None
+    image_max: int = 100
+    # Also delete replaced thumbnails from the server's file store, not only
+    # from the mission
+    delete_old_files: bool = True
     # Digitraffic allows 60 image requests a minute per IP
     image_request_gap: float = 1.1
     icon: str = ""
@@ -65,8 +73,12 @@ class WeathercamSettings:
         d = cls()
         return cls(
             bbox=_bbox_env("WEATHERCAMS_BBOX"),
-            embed_bbox=_bbox_env("WEATHERCAMS_EMBED_BBOX"),
-            embed_max=int(env_float("WEATHERCAMS_EMBED_MAX", d.embed_max)),
+            # WEATHERCAMS_EMBED_* are the names of the earlier embedded-image test
+            image_bbox=(_bbox_env("WEATHERCAMS_IMAGE_BBOX")
+                        or _bbox_env("WEATHERCAMS_EMBED_BBOX")),
+            image_max=int(env_float("WEATHERCAMS_IMAGE_MAX",
+                                    env_float("WEATHERCAMS_EMBED_MAX", d.image_max))),
+            delete_old_files=env_bool("WEATHERCAMS_DELETE_OLD_FILES", d.delete_old_files),
             thumbnails=env_bool("WEATHERCAMS_THUMBNAILS", d.thumbnails),
             cot_type=env("WEATHERCAMS_COT_TYPE", d.cot_type),
             icon=env("WEATHERCAMS_ICON", d.icon),
@@ -149,8 +161,9 @@ def station_remarks(station: Dict[str, Any], ws: WeathercamSettings) -> str:
 
 def station_cot(station: Dict[str, Any], ws: WeathercamSettings, mission_name: str,
                 how: str = "h-e", now: Optional[datetime] = None,
-                image: Optional[str] = None) -> bytes:
-    """Mission item for one camera station; image = base64 JPEG to embed."""
+                attachment: Optional[str] = None) -> bytes:
+    """Mission item for one camera station; attachment = hash of the mission
+    file shown as the marker's attachment."""
     t = now or datetime.now(timezone.utc)
     root = ET.Element("event", {
         "version": "2.0", "type": ws.cot_type, "uid": f"digitraffic.weathercam.{station['id']}",
@@ -167,20 +180,21 @@ def station_cot(station: Dict[str, Any], ws: WeathercamSettings, mission_name: s
     if ws.icon:
         ET.SubElement(detail, "usericon", {"iconsetpath": ws.icon})
     ET.SubElement(detail, "remarks").text = station_remarks(station, ws)
-    if image:
-        # ATAK's ImageDetailHandler stores this and shows it on the marker
-        ET.SubElement(detail, "image", {"mime": "image/jpeg"}).text = image
+    if attachment:
+        # TAK links mission files to a map item through this list (as ATAK
+        # does for attachments a user publishes)
+        ET.SubElement(detail, "attachment_list", {"hashes": json.dumps([attachment])})
     return ET.tostring(root)
 
 
 def build_cot_files(fc: Dict[str, Any], ws: WeathercamSettings, mission_name: str,
-                    images: Optional[Mapping[str, str]] = None) -> Dict[str, bytes | str]:
-    """Mission items keyed by UID. images: station id -> base64 thumbnail."""
+                    attachments: Optional[Mapping[str, str]] = None) -> Dict[str, bytes | str]:
+    """Mission items keyed by UID. attachments: station id -> file hash."""
     files: Dict[str, bytes | str] = {}
     stations = extract_stations(fc, ws)
     for station in stations:
         files[f"digitraffic.weathercam.{station['id']}"] = station_cot(
-            station, ws, mission_name, image=(images or {}).get(station["id"]))
+            station, ws, mission_name, attachment=(attachments or {}).get(station["id"]))
     features = len(fc.get("features", []) or [])
     LOG.info("%s: %d of %d stations, %d cameras", mission_name, len(stations), features,
              sum(len(s["presets"]) for s in stations))
@@ -203,29 +217,29 @@ def _get_image(url: str, headers: Mapping[str, str], timeout: float = 30.0
 
 
 class ThumbnailCache:
-    """Latest thumbnail of each embedded station, refreshed with ETags."""
+    """Latest thumbnail of each selected station, refreshed with ETags."""
 
     def __init__(self, get: Any = _get_image, sleep: Any = asyncio.sleep) -> None:
         self._get, self._sleep = get, sleep
-        self.images: Dict[str, str] = {}  # station id -> base64
+        self.images: Dict[str, bytes] = {}  # station id -> JPEG
         self._etags: Dict[str, str] = {}
 
-    def embedded(self, fc: Dict[str, Any], ws: WeathercamSettings) -> List[Dict[str, Any]]:
-        """Stations whose thumbnail is embedded."""
-        if ws.embed_bbox is None:
+    def selected(self, fc: Dict[str, Any], ws: WeathercamSettings) -> List[Dict[str, Any]]:
+        """Stations that get a thumbnail."""
+        if ws.image_bbox is None:
             return []
         stations = [s for s in extract_stations(fc, ws)
-                    if _in_bbox(s["lat"], s["lon"], ws.embed_bbox)]
-        if len(stations) > ws.embed_max:
-            LOG.warning("%d stations in WEATHERCAMS_EMBED_BBOX, embedding the first %d "
-                        "(WEATHERCAMS_EMBED_MAX)", len(stations), ws.embed_max)
-        return stations[:ws.embed_max]
+                    if _in_bbox(s["lat"], s["lon"], ws.image_bbox)]
+        if len(stations) > ws.image_max:
+            LOG.warning("%d stations in WEATHERCAMS_IMAGE_BBOX, using the first %d "
+                        "(WEATHERCAMS_IMAGE_MAX)", len(stations), ws.image_max)
+        return stations[:ws.image_max]
 
     async def refresh(self, fc: Dict[str, Any], ws: WeathercamSettings,
-                      headers: Mapping[str, str]) -> Dict[str, str]:
+                      headers: Mapping[str, str]) -> Dict[str, bytes]:
         """Fetch changed thumbnails (first camera of each station), at most
         one request per image_request_gap seconds. Returns the images."""
-        stations = self.embedded(fc, ws)
+        stations = self.selected(fc, ws)
         wanted = {s["id"] for s in stations}
         for sid in set(self.images) - wanted:
             self.images.pop(sid, None)
@@ -244,10 +258,115 @@ class ThumbnailCache:
                 LOG.warning("thumbnail %s: %s", url, exc)
                 continue
             if status == 200 and body:
-                self.images[station["id"]] = base64.b64encode(body).decode("ascii")
+                self.images[station["id"]] = body
                 if etag:
                     self._etags[station["id"]] = etag
                 fetched += 1
         if stations:
-            LOG.info("thumbnails: %d embedded, %d new", len(self.images), fetched)
+            LOG.info("thumbnails: %d stations, %d new", len(self.images), fetched)
         return dict(self.images)
+
+
+def file_name(station_id: str) -> str:
+    """Mission file name of a station's thumbnail (the same every round)."""
+    return f"{FILE_PREFIX}{station_id}.jpg"
+
+
+def _json(body: Any) -> Any:
+    if isinstance(body, (bytes, str)):
+        try:
+            return json.loads(body)
+        except ValueError:
+            return None
+    return body
+
+
+def mission_files(mission: Mapping[str, Any]) -> Dict[str, str]:
+    """hash -> name of this feeder's thumbnails in a mission (get_mission data)."""
+    files: Dict[str, str] = {}
+    for content in mission.get("contents", []) or []:
+        data = content.get("data", content) if isinstance(content, dict) else {}
+        name = str(data.get("name") or data.get("filename") or "")
+        digest = data.get("hash")
+        if digest and name.startswith(FILE_PREFIX):
+            files[str(digest)] = name
+    return files
+
+
+class AttachmentSync:
+    """Keeps one thumbnail file per station in the mission: uploads new
+    pictures, adds them to the mission and removes the replaced ones."""
+
+    def __init__(self, server: Any, mission_name: str, creator_uid: str) -> None:
+        self.server, self.mission_name, self.creator_uid = server, mission_name, creator_uid
+
+    async def _request(self, method: str, path: str, token: str = "", **kwargs: Any
+                       ) -> Tuple[int, Any]:
+        headers = dict(kwargs.pop("headers", {}) or {})
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        return await self.server.connection.request(
+            method, self.server.api_base_url + path, headers=headers, **kwargs)
+
+    async def upload(self, images: Mapping[str, bytes], mission: Mapping[str, Any],
+                     token: str) -> Tuple[Dict[str, str], List[str]]:
+        """Upload the pictures the mission does not have yet. Returns
+        station id -> hash for the markers and the hashes to remove once the
+        markers point at the new files."""
+        present = mission_files(mission)
+        hashes: Dict[str, str] = {}
+        new: Dict[str, str] = {}  # hash -> station id
+        for sid, body in images.items():
+            digest = hashlib.sha256(body).hexdigest()
+            if digest not in present and digest not in new:
+                query = urllib.parse.urlencode({"name": file_name(sid),
+                                                "creatorUid": self.creator_uid})
+                status, result = await self._request(
+                    "post", f"/Marti/sync/upload?{query}",
+                    headers={"Content-Type": "image/jpeg"}, data=body)
+                if status != 200:
+                    LOG.warning("%s: upload of %s failed: HTTP %s %s", self.mission_name,
+                                file_name(sid), status, str(result)[:200])
+                    continue
+                meta = _json(result)
+                stored = str(meta.get("Hash") or "") if isinstance(meta, dict) else ""
+                if stored and stored.lower() != digest:
+                    LOG.warning("%s: server hash %s differs from %s for %s",
+                                self.mission_name, stored, digest, file_name(sid))
+                    digest = stored.lower()
+                new[digest] = sid
+            hashes[sid] = digest
+        if new:
+            status, result = await self._request(
+                "put", f"/Marti/api/missions/{urllib.parse.quote(self.mission_name)}/contents"
+                f"?{urllib.parse.urlencode({'creatorUid': self.creator_uid})}",
+                token=token, json={"hashes": sorted(new)})
+            if status != 200:
+                LOG.warning("%s: adding %d files failed: HTTP %s %s", self.mission_name,
+                            len(new), status, str(result)[:200])
+                for digest, sid in new.items():
+                    hashes.pop(sid, None)
+        in_use = set(hashes.values())
+        old = [digest for digest in present if digest not in in_use]
+        LOG.info("%s: %d thumbnails, %d new files, %d to remove", self.mission_name,
+                 len(hashes), len(new), len(old))
+        return hashes, old
+
+    async def remove(self, digests: List[str], token: str, delete_files: bool) -> None:
+        """Remove replaced thumbnails from the mission (and the file store)."""
+        for digest in digests:
+            query = urllib.parse.urlencode({"hash": digest, "creatorUid": self.creator_uid})
+            status, result = await self._request(
+                "delete",
+                f"/Marti/api/missions/{urllib.parse.quote(self.mission_name)}/contents?{query}",
+                token=token)
+            if status != 200:
+                LOG.warning("%s: removing file %s failed: HTTP %s %s", self.mission_name,
+                            digest, status, str(result)[:200])
+                continue
+            if delete_files:
+                status, result = await self._request(
+                    "delete", f"/Marti/sync/delete?{urllib.parse.urlencode({'Hash': digest})}")
+                if status != 200:
+                    LOG.debug("%s: deleting stored file %s: HTTP %s %s", self.mission_name,
+                              digest, status, str(result)[:200])

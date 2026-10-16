@@ -63,12 +63,17 @@ tags `#weather #weathercam`.
 
 Markers use CoT type `b-m-p-s-p-loc` (sensor point), which ATAK draws with
 its own sensor icon; Quick Pic (`b-i-x-i`) is left for users' own photos.
-Stations inside `WEATHERCAMS_EMBED_BBOX` also carry the thumbnail of their
-first camera in the CoT (`<image mime="image/jpeg">`, base64). Thumbnails are
-fetched with ETags, at most one request per 1.1 s (Digitraffic allows 60
-image requests a minute), and a new picture re-uploads only that station.
-Experimental: on the test server ATAK did not show the embedded picture
-("No picture found"), so keep it off for now.
+Stations inside `WEATHERCAMS_IMAGE_BBOX` also get the thumbnail of their
+first camera as a mission file, `weathercam_<stationId>.jpg`, linked to the
+marker with `<attachment_list hashes='["<sha256>"]'/>` so ATAK lists it
+under the marker's attachments. Thumbnails are fetched with ETags, at most
+one request per 1.1 s (Digitraffic allows 60 image requests a minute). A new
+picture is uploaded to the server's file store, added to the mission and the
+marker re-sent with its hash; the station's previous file is then removed
+from the mission (and from the file store, `WEATHERCAMS_DELETE_OLD_FILES`).
+Only files named `weathercam_*` are touched. An unchanged picture sends
+nothing. Experimental: an earlier test embedded the picture in the CoT
+(`<image>`), which ATAK then offered to publish back to the mission.
 
 Tested on a TAK 5.8 test server: 812 stations, 2266 cameras. Not yet
 tested: opening the links in the remarks.
@@ -102,8 +107,9 @@ tested: opening the links in the remarks.
 | `WEATHERCAMS_UPDATE_INTERVAL` | `600` | Seconds between weather camera syncs (`<DATASET>_UPDATE_INTERVAL` works for every dataset) |
 | `WEATHERCAMS_BBOX` | all of Finland | Area `west,south,east,north`, e.g. `22,60,26,62` |
 | `WEATHERCAMS_THUMBNAILS` | `0` | `1` = link the small images (`?thumbnail=true`) |
-| `WEATHERCAMS_EMBED_BBOX` | none | Area `west,south,east,north` whose stations get an embedded thumbnail; empty = none |
-| `WEATHERCAMS_EMBED_MAX` | `100` | Most stations with an embedded thumbnail |
+| `WEATHERCAMS_IMAGE_BBOX` | none | Area `west,south,east,north` whose stations get their thumbnail as a mission file; empty = none (`WEATHERCAMS_EMBED_BBOX` also works) |
+| `WEATHERCAMS_IMAGE_MAX` | `100` | Most stations with a thumbnail (`WEATHERCAMS_EMBED_MAX` also works) |
+| `WEATHERCAMS_DELETE_OLD_FILES` | `1` | Also delete replaced thumbnails from the server's file store |
 | `WEATHERCAMS_COT_TYPE` | `b-m-p-s-p-loc` | CoT type of the camera markers |
 | `WEATHERCAMS_ICON` | none | Optional ATAK iconset path instead of the type's icon |
 | `WEATHERCAMS_STALE_DAYS` | `365` | Stale time; removal from the mission hides a station |
@@ -164,6 +170,10 @@ Changes in this fork (Street3r):
   - Every event of a send round reaches TAK. pytak's send queue holds 100
     events and dropped the oldest when full, so rounds of more than 100
     lost the rest.
+- 2026-10-16 (draft)
+  - `weathercams` dataset: one sensor marker per Digitraffic weather camera
+    station in its own mission; optional thumbnails as mission files linked
+    to the marker, the previous file removed when a new one arrives.
 
 - 2026-10-15
   - Draft: Digitraffic weather cameras as the `weathercams` dataset in their

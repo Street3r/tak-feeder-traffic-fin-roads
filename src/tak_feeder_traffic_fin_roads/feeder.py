@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
@@ -151,7 +150,7 @@ def _points(values: List[Tuple[str, str]]) -> Tuple[Tuple[float, float], ...]:
 
 def cot_signature(event: ET.Element) -> Tuple[Any, ...]:
     """What ATAK shows of a CoT item: type, position, label, remarks, icon,
-    colour, line points and embedded image. Times are left out, they change
+    colour, line points and attached files. Times are left out, they change
     every round."""
     point = event.find("point")
     detail = event.find("detail")
@@ -170,15 +169,15 @@ def cot_signature(event: ET.Element) -> Tuple[Any, ...]:
         attr("usericon", "iconsetpath"),
         attr("color", "argb"),
         _points([tuple(l.get("point", ",").split(",", 1)) for l in links]),  # type: ignore[misc]
-        _image_digest(detail),
+        _attachments(detail),
     )
 
 
-def _image_digest(detail: Optional[ET.Element]) -> str:
-    """Digest of an embedded image, so a new picture counts as a change."""
-    image = detail.find("image") if detail is not None else None
-    text = "".join((image.text or "").split()) if image is not None else ""
-    return hashlib.sha1(text.encode("ascii", "ignore")).hexdigest() if text else ""
+def _attachments(detail: Optional[ET.Element]) -> str:
+    """Hashes of the attached mission files, so a new picture counts as a change."""
+    el = detail.find("attachment_list") if detail is not None else None
+    hashes = el.get("hashes", "") if el is not None else ""
+    return "".join(c for c in hashes if c.isalnum() or c == ",").lower()
 
 
 def parse_signatures(xml: Any) -> Optional[Dict[str, Tuple[Any, ...]]]:
@@ -201,6 +200,7 @@ class MissionSync:
     def __init__(self, s: Settings, ds: Dataset, server: Any, build_package: Any) -> None:
         self.s, self.ds, self.server, self.build_package = s, ds, server, build_package
         self.thumbnails = weathercam.ThumbnailCache()
+        self.attachments = weathercam.AttachmentSync(server, ds.mission_name, s.my_uid)
 
     async def _create(self) -> None:
         group: Any = self.ds.groups or ""  # a list becomes repeated group=
@@ -265,11 +265,16 @@ class MissionSync:
             raise RuntimeError(f"cannot get mission {self.ds.mission_name}: HTTP {status}")
 
         fc = await digitraffic.fetch_geojson(self.ds.url, self.s.digitraffic_user)
+        old_files: List[str] = []
         if self.ds.name == "weathercams":
             images = await self.thumbnails.refresh(fc, self.s.weathercam, digitraffic_headers(
                 self.s.digitraffic_user, "tak-feeder-traffic-fin-roads", __version__))
+            hashes: Dict[str, str] = {}
+            if images or weathercam.mission_files(mission["data"][0]):
+                hashes, old_files = await self.attachments.upload(
+                    images, mission["data"][0], self.ds.token)
             files = weathercam.build_cot_files(fc, self.s.weathercam, self.ds.mission_name,
-                                               images)
+                                               hashes)
         else:
             candidates = digitraffic.extract_cot_candidates(fc, self.ds.name, self.s.timezone)
             files = build_cot_files(candidates, self.s, self.ds.mission_name)
@@ -286,6 +291,7 @@ class MissionSync:
         upload = await self._changed(files, wanted != present)
         if not upload:
             logger.info("%s: %d items, no changes", self.ds.mission_name, len(wanted))
+            await self._remove_files(old_files)
             return False
         package = self.build_package(
             name=self.ds.mission_name, mission_name=self.ds.mission_name,
@@ -297,7 +303,14 @@ class MissionSync:
             self.ds.mission_name, self.s.my_uid, self.ds.token, package)
         if s != 200:
             raise RuntimeError(f"package upload to {self.ds.mission_name} failed: HTTP {s} {r}")
+        await self._remove_files(old_files)
         return True
+
+    async def _remove_files(self, digests: List[str]) -> None:
+        """Replaced thumbnails go only after the markers point at the new ones."""
+        if digests:
+            await self.attachments.remove(digests, self.ds.token,
+                                          self.s.weathercam.delete_old_files)
 
 
 async def run(s: Settings, server: Any, build_package: Any,

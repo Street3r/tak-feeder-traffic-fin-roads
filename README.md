@@ -72,7 +72,10 @@ picture is uploaded to the server's file store, added to the mission and the
 marker re-sent with its hash; the station's previous file is then removed
 from the mission (and from the file store, `WEATHERCAMS_DELETE_OLD_FILES`).
 Only files named `weathercam_*` are touched. An unchanged picture sends
-nothing. Experimental: an earlier test embedded the picture in the CoT
+nothing. The pictures go out in batches of `WEATHERCAMS_IMAGE_BATCH`
+stations as they are fetched (50 stations take about a minute), so phones
+get a steady trickle of small mission changes instead of the whole round
+(about 800 new files, markers and removals) at once. Experimental: an earlier test embedded the picture in the CoT
 (`<image>`), which ATAK then offered to publish back to the mission.
 
 Tested on a TAK 5.8 test server: 812 stations, 2266 cameras. Not yet
@@ -109,6 +112,7 @@ tested: opening the links in the remarks.
 | `WEATHERCAMS_THUMBNAILS` | `0` | `1` = link the small images (`?thumbnail=true`) |
 | `WEATHERCAMS_IMAGE_BBOX` | none | Area `west,south,east,north` whose stations get their thumbnail as a mission file; empty = none (`WEATHERCAMS_EMBED_BBOX` also works) |
 | `WEATHERCAMS_IMAGE_MAX` | `100` | Most stations with a thumbnail (`WEATHERCAMS_EMBED_MAX` also works) |
+| `WEATHERCAMS_IMAGE_BATCH` | `50` | Stations per batch of thumbnails sent to the mission |
 | `WEATHERCAMS_DELETE_OLD_FILES` | `1` | Also delete replaced thumbnails from the server's file store |
 | `WEATHERCAMS_COT_TYPE` | `b-m-p-s-p-loc` | CoT type of the camera markers |
 | `WEATHERCAMS_ICON` | none | Optional ATAK iconset path instead of the type's icon |
@@ -173,7 +177,8 @@ Changes in this fork (Street3r):
 - 2026-10-16 (draft)
   - `weathercams` dataset: one sensor marker per Digitraffic weather camera
     station in its own mission; optional thumbnails as mission files linked
-    to the marker, the previous file removed when a new one arrives.
+    to the marker, the previous file removed when a new one arrives;
+    thumbnails sent in batches of 50 stations as they are fetched.
 
 - 2026-10-15
   - Draft: Digitraffic weather cameras as the `weathercams` dataset in their

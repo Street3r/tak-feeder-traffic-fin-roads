@@ -201,6 +201,8 @@ class MissionSync:
         self.s, self.ds, self.server, self.build_package = s, ds, server, build_package
         self.thumbnails = weathercam.ThumbnailCache()
         self.attachments = weathercam.AttachmentSync(server, ds.mission_name, s.my_uid)
+        # station id -> thumbnail hash the marker points at
+        self.hashes: Optional[Dict[str, str]] = None
 
     async def _create(self) -> None:
         group: Any = self.ds.groups or ""  # a list becomes repeated group=
@@ -265,22 +267,17 @@ class MissionSync:
             raise RuntimeError(f"cannot get mission {self.ds.mission_name}: HTTP {status}")
 
         fc = await digitraffic.fetch_geojson(self.ds.url, self.s.digitraffic_user)
-        old_files: List[str] = []
         if self.ds.name == "weathercams":
-            images = await self.thumbnails.refresh(fc, self.s.weathercam, digitraffic_headers(
-                self.s.digitraffic_user, "tak-feeder-traffic-fin-roads", __version__))
-            hashes: Dict[str, str] = {}
-            if images or weathercam.mission_files(mission["data"][0]):
-                hashes, old_files = await self.attachments.upload(
-                    images, mission["data"][0], self.ds.token)
-            files = weathercam.build_cot_files(fc, self.s.weathercam, self.ds.mission_name,
-                                               hashes)
-        else:
-            candidates = digitraffic.extract_cot_candidates(fc, self.ds.name, self.s.timezone)
-            files = build_cot_files(candidates, self.s, self.ds.mission_name)
+            return await self._run_weathercams(mission["data"][0], fc)
+        candidates = digitraffic.extract_cot_candidates(fc, self.ds.name, self.s.timezone)
+        files = build_cot_files(candidates, self.s, self.ds.mission_name)
+        return await self._sync_items(mission["data"][0], files)
+
+    async def _sync_items(self, mission: Dict[str, Any], files: Dict[str, Any]) -> bool:
+        """Remove items that left the dataset and upload new or changed ones.
+        True if a package was uploaded."""
         wanted = set(files)
-        present = {u.get("data") for u in mission["data"][0].get("uids", [])
-                   if isinstance(u, dict)}
+        present = {u.get("data") for u in mission.get("uids", []) if isinstance(u, dict)}
         for uid in sorted(present - wanted):
             logger.info("%s: removing %s", self.ds.mission_name, uid)
             s, r = await self.server.mission.remove_mission_content(
@@ -291,26 +288,69 @@ class MissionSync:
         upload = await self._changed(files, wanted != present)
         if not upload:
             logger.info("%s: %d items, no changes", self.ds.mission_name, len(wanted))
-            await self._remove_files(old_files)
             return False
+        logger.info("%s: uploading %d of %d items", self.ds.mission_name,
+                    len(upload), len(files))
+        await self._upload_package(upload)
+        return True
+
+    async def _upload_package(self, cot_files: Dict[str, Any]) -> None:
         package = self.build_package(
             name=self.ds.mission_name, mission_name=self.ds.mission_name,
             mission_server=f"{self.s.api_host}:8443:ssl", creator_uid=self.s.my_uid,
-            cot_files=upload, groups=self.ds.groups or None)
-        logger.info("%s: uploading %d of %d items", self.ds.mission_name,
-                    len(upload), len(files))
+            cot_files=cot_files, groups=self.ds.groups or None)
         s, r = await self.server.mission.add_mission_package(
             self.ds.mission_name, self.s.my_uid, self.ds.token, package)
         if s != 200:
             raise RuntimeError(f"package upload to {self.ds.mission_name} failed: HTTP {s} {r}")
-        await self._remove_files(old_files)
-        return True
 
-    async def _remove_files(self, digests: List[str]) -> None:
-        """Replaced thumbnails go only after the markers point at the new ones."""
-        if digests:
-            await self.attachments.remove(digests, self.ds.token,
-                                          self.s.weathercam.delete_old_files)
+    async def _run_weathercams(self, mission: Dict[str, Any], fc: Dict[str, Any]) -> bool:
+        """Sync the station markers, then send the thumbnails in batches as
+        they are fetched: each batch uploads its new pictures, points its
+        markers at them and removes the pictures they replaced."""
+        ws, name = self.s.weathercam, self.ds.mission_name
+        present = weathercam.mission_files(mission)  # hash -> file name
+        if self.hashes is None:  # after a restart: what the markers show now
+            self.hashes = weathercam.marker_attachments(mission)
+        stations = self.thumbnails.selected(fc, ws)
+        ids = [st["id"] for st in stations]
+        self.thumbnails.prune(ids)
+        self.hashes = {sid: h for sid, h in self.hashes.items() if sid in ids and h in present}
+        uploaded = await self._sync_items(
+            mission, weathercam.build_cot_files(fc, ws, name, self.hashes))
+        # files of stations that left the image area or of a failed round
+        await self._remove_unused(present)
+        headers = digitraffic_headers(self.s.digitraffic_user, "tak-feeder-traffic-fin-roads",
+                                      __version__)
+        batches = [stations[i:i + ws.image_batch]
+                   for i in range(0, len(stations), ws.image_batch)]
+        for number, batch in enumerate(batches, 1):
+            images, fetched = await self.thumbnails.refresh(batch, ws, headers)
+            hashes = await self.attachments.upload(images, present, self.ds.token)
+            changed = {sid: h for sid, h in hashes.items() if self.hashes.get(sid) != h}
+            if changed:
+                await self._upload_package({
+                    f"digitraffic.weathercam.{st['id']}": weathercam.station_cot(
+                        st, ws, name, attachment=changed[st["id"]])
+                    for st in batch if st["id"] in changed})
+                self.hashes.update(changed)
+                uploaded = True
+            removed = await self._remove_unused(present)
+            logger.info("%s: images %d/%d: %d fetched, %d markers updated, %d files removed",
+                        name, number, len(batches), fetched, len(changed), len(removed))
+        return uploaded
+
+    async def _remove_unused(self, present: Dict[str, str]) -> List[str]:
+        """Remove thumbnails no marker points at any more."""
+        in_use = set((self.hashes or {}).values())
+        unused = [digest for digest in present if digest not in in_use]
+        if not unused:
+            return []
+        removed = await self.attachments.remove(unused, self.ds.token,
+                                                self.s.weathercam.delete_old_files)
+        for digest in removed:
+            present.pop(digest, None)
+        return removed
 
 
 async def run(s: Settings, server: Any, build_package: Any,

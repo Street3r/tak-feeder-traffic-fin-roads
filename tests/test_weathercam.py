@@ -85,13 +85,17 @@ class AttachmentTest(unittest.TestCase):
         fc = {"features": [station("C1"), station("C2", lon=27.0, lat=65.0)]}
         ws = weathercam.WeathercamSettings(image_bbox=(19.0, 59.0, 26.0, 61.0))
         cache = weathercam.ThumbnailCache(get=get, sleep=mock.AsyncMock())
-        self.assertEqual(asyncio.run(cache.refresh(fc, ws, {})), {"C1": b"ABC"})
-        self.assertEqual(asyncio.run(cache.refresh(fc, ws, {})), {"C1": b"ABC"})
+        stations = cache.selected(fc, ws)
+        self.assertEqual([st["id"] for st in stations], ["C1"])
+        self.assertEqual(asyncio.run(cache.refresh(stations, ws, {})), ({"C1": b"ABC"}, 1))
+        self.assertEqual(asyncio.run(cache.refresh(stations, ws, {})), ({"C1": b"ABC"}, 0))
         self.assertEqual(calls, [
             ("https://weathercam.digitraffic.fi/C100.jpg?thumbnail=true", None),
             ("https://weathercam.digitraffic.fi/C100.jpg?thumbnail=true", '"e1"')])
-        # no image area: nothing fetched
-        self.assertEqual(asyncio.run(cache.refresh(fc, weathercam.WeathercamSettings(), {})), {})
+        # no image area: no station gets a thumbnail
+        self.assertEqual(cache.selected(fc, weathercam.WeathercamSettings()), [])
+        cache.prune([])
+        self.assertEqual(cache.images, {})
 
     def test_image_max(self) -> None:
         fc = {"features": [station(f"C{i}") for i in range(5)]}
@@ -107,10 +111,12 @@ class AttachmentTest(unittest.TestCase):
             {"data": {"name": "weathercam_C2.jpg", "hash": same}},
             {"data": {"name": "weathercam_C1.jpg", "hash": "old1"}},
             {"data": {"name": "user-photo.jpg", "hash": "user1"}}]}
+        present = weathercam.mission_files(mission)
+        self.assertEqual(set(present), {same, "old1"})  # files of others are left alone
         sync = weathercam.AttachmentSync(server, "Weather Cams", "roads.0001")
-        hashes, old = asyncio.run(sync.upload({"C1": b"NEW", "C2": b"SAME"}, mission, "tok"))
+        hashes = asyncio.run(sync.upload({"C1": b"NEW", "C2": b"SAME"}, present, "tok"))
         self.assertEqual(hashes, {"C1": new, "C2": same})
-        self.assertEqual(old, ["old1"])  # files of others are left alone
+        self.assertEqual(set(present), {same, "old1", new})
         upload, add = server.connection.request.call_args_list
         self.assertEqual(upload.args[0], "post")
         self.assertEqual(upload.args[1], "https://tak:8443/Marti/sync/upload"
@@ -122,7 +128,7 @@ class AttachmentTest(unittest.TestCase):
         self.assertEqual(add.kwargs["headers"]["Authorization"], "Bearer tok")
 
         server.connection.request.reset_mock()
-        asyncio.run(sync.remove(["old1"], "tok", delete_files=True))
+        self.assertEqual(asyncio.run(sync.remove(["old1"], "tok", delete_files=True)), ["old1"])
         remove, delete = server.connection.request.call_args_list
         self.assertEqual(remove.args, ("delete", "https://tak:8443/Marti/api/missions/"
                                        "Weather%20Cams/contents?hash=old1&creatorUid=roads.0001"))
@@ -132,8 +138,16 @@ class AttachmentTest(unittest.TestCase):
         server = mock.Mock(api_base_url="https://tak:8443")
         server.connection.request = mock.AsyncMock(return_value=(500, "error"))
         sync = weathercam.AttachmentSync(server, "M", "roads.0001")
-        hashes, old = asyncio.run(sync.upload({"C1": b"NEW"}, {}, "tok"))
-        self.assertEqual((hashes, old), ({}, []))
+        present: dict = {}
+        self.assertEqual(asyncio.run(sync.upload({"C1": b"NEW"}, present, "tok")), {})
+        self.assertEqual(present, {})
+
+    def test_marker_attachments(self) -> None:
+        mission = {"uids": [
+            {"data": "digitraffic.weathercam.C1", "details": {"attachments": ["ABC"]}},
+            {"data": "digitraffic.weathercam.C2", "details": {}},
+            {"data": "user.marker", "details": {"attachments": ["u"]}}]}
+        self.assertEqual(weathercam.marker_attachments(mission), {"C1": "abc"})
 
 
 class SettingsTest(unittest.TestCase):
@@ -141,7 +155,8 @@ class SettingsTest(unittest.TestCase):
         env = {"DATASETS": "traffic-announcements,weathercams",
                "WEATHERCAMS_MISSION_GROUP": "WEATHERCAM",
                "WEATHERCAMS_BBOX": "19,59,32,71", "WEATHERCAMS_THUMBNAILS": "1",
-               "WEATHERCAMS_EMBED_BBOX": "24.5,60.1,25.3,60.4", "WEATHERCAMS_IMAGE_MAX": "900"}
+               "WEATHERCAMS_EMBED_BBOX": "24.5,60.1,25.3,60.4", "WEATHERCAMS_IMAGE_MAX": "900",
+               "WEATHERCAMS_IMAGE_BATCH": "20"}
         with mock.patch.dict("os.environ", env, clear=True):
             s = feeder.Settings.from_env()
         cams = s.datasets[1]
@@ -154,6 +169,7 @@ class SettingsTest(unittest.TestCase):
         # the old WEATHERCAMS_EMBED_BBOX name still works
         self.assertEqual(s.weathercam.image_bbox, (24.5, 60.1, 25.3, 60.4))
         self.assertEqual(s.weathercam.image_max, 900)
+        self.assertEqual(s.weathercam.image_batch, 20)
         self.assertTrue(s.weathercam.delete_old_files)
         self.assertEqual(s.weathercam.cot_type, "b-m-p-s-p-loc")
 
@@ -178,6 +194,73 @@ class SyncTest(unittest.TestCase):
             self.assertTrue(asyncio.run(sync.run_once()))
         self.assertEqual(set(package.call_args.kwargs["cot_files"]), {"digitraffic.weathercam.C1"})
         self.assertEqual(package.call_args.kwargs["groups"], ["WEATHERCAM"])
+
+    def test_images_in_batches(self) -> None:
+        h = {k: hashlib.sha256(k.encode()).hexdigest() for k in ("A1", "B1", "C1", "A2")}
+        log = []
+        srv = mock.Mock(api_base_url="https://tak:8443")
+        srv.mission.create_mission_subscription = mock.AsyncMock(
+            return_value=(201, {"data": {"token": "t"}}))
+        # A already has a picture from an earlier run
+        srv.mission.get_mission = mock.AsyncMock(return_value=(200, {"data": [{
+            "uids": [{"data": "digitraffic.weathercam.A", "details": {"attachments": ["old"]}}],
+            "contents": [{"data": {"name": "weathercam_A.jpg", "hash": "old"}}]}]}))
+
+        async def request(method, url, **kw):
+            log.append((method, url.split("?")[0].rsplit("/", 1)[-1]))
+            if method == "post":
+                return 200, json.dumps({"Hash": hashlib.sha256(kw["data"]).hexdigest()})
+            return 200, "{}"
+        srv.connection.request = request
+
+        async def add_package(*args):
+            log.append(("package",))
+            return 200, {}
+        srv.mission.add_mission_package = add_package
+        packages = []
+        package = mock.Mock(side_effect=lambda **kw: packages.append(kw["cot_files"]) or b"z")
+        images = {"A": b"A1", "B": b"B1", "C": b"C1"}
+        cache = weathercam.ThumbnailCache(
+            get=lambda url, hdrs: (200, "", images[url.split("/")[-1][0]]),
+            sleep=mock.AsyncMock())
+        ws = weathercam.WeathercamSettings(image_bbox=(19.0, 59.0, 26.0, 61.0), image_batch=2)
+        ds = feeder.Dataset("weathercams", weathercam.STATIONS_URL, "WeatherCamsFin")
+        sync = feeder.MissionSync(feeder.Settings(api_host="tak", weathercam=ws), ds, srv,
+                                  package)
+        sync.thumbnails = cache
+        fc = json.dumps({"features": [station("A"), station("B"), station("C")]}).encode()
+        with mock.patch.object(digitraffic, "fetch", mock.AsyncMock(return_value=fc)), \
+                mock.patch.object(feeder.asyncio, "sleep", mock.AsyncMock()):
+            self.assertTrue(asyncio.run(sync.run_once()))
+        # markers first (stored items unreadable: all), then one package per batch of two
+        self.assertEqual([sorted(p) for p in packages], [
+            ["digitraffic.weathercam.A", "digitraffic.weathercam.B", "digitraffic.weathercam.C"],
+            ["digitraffic.weathercam.A", "digitraffic.weathercam.B"],
+            ["digitraffic.weathercam.C"]])
+        self.assertIn(h["A1"], packages[1]["digitraffic.weathercam.A"].decode())
+        self.assertEqual(sync.hashes, {"A": h["A1"], "B": h["B1"], "C": h["C1"]})
+        # the old picture of A goes only after its marker points at the new one
+        self.assertLess(log.index(("package",), 1), log.index(("delete", "contents")))
+        self.assertEqual([e for e in log if e[0] == "delete"],
+                         [("delete", "contents"), ("delete", "delete")])
+
+        # next round: only A has a new picture
+        images["A"] = b"A2"
+        log.clear()
+        packages.clear()
+        srv.mission.get_mission = mock.AsyncMock(return_value=(200, {"data": [{
+            "uids": [{"data": f"digitraffic.weathercam.{k}"} for k in "ABC"],
+            "contents": [{"data": {"name": f"weathercam_{k}.jpg", "hash": h[f"{k}1"]}}
+                         for k in "ABC"]}]}))
+        srv.mission.get_mission_cot = mock.AsyncMock(return_value=(200, "<events>" + "".join(
+            weathercam.station_cot(weathercam.extract_stations(
+                json.loads(fc), ws)[i], ws, "WeatherCamsFin", attachment=h[f"{k}1"]).decode()
+            for i, k in enumerate("ABC")) + "</events>"))
+        with mock.patch.object(digitraffic, "fetch", mock.AsyncMock(return_value=fc)), \
+                mock.patch.object(feeder.asyncio, "sleep", mock.AsyncMock()):
+            self.assertTrue(asyncio.run(sync.run_once()))
+        self.assertEqual([sorted(p) for p in packages], [["digitraffic.weathercam.A"]])
+        self.assertIn(("delete", "contents"), log)
 
 
 if __name__ == "__main__":

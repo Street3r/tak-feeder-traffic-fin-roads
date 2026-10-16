@@ -57,6 +57,10 @@ class WeathercamSettings:
     # mission file attached to the marker. None = no images.
     image_bbox: Optional[Tuple[float, float, float, float]] = None
     image_max: int = 100
+    # Thumbnails are sent in batches of this many stations as they are
+    # fetched (about one batch a minute at the Digitraffic rate), so phones
+    # get a steady trickle instead of the whole round at once
+    image_batch: int = 50
     # Also delete replaced thumbnails from the server's file store, not only
     # from the mission
     delete_old_files: bool = True
@@ -78,6 +82,7 @@ class WeathercamSettings:
                         or _bbox_env("WEATHERCAMS_EMBED_BBOX")),
             image_max=int(env_float("WEATHERCAMS_IMAGE_MAX",
                                     env_float("WEATHERCAMS_EMBED_MAX", d.image_max))),
+            image_batch=max(1, int(env_float("WEATHERCAMS_IMAGE_BATCH", d.image_batch))),
             delete_old_files=env_bool("WEATHERCAMS_DELETE_OLD_FILES", d.delete_old_files),
             thumbnails=env_bool("WEATHERCAMS_THUMBNAILS", d.thumbnails),
             cot_type=env("WEATHERCAMS_COT_TYPE", d.cot_type),
@@ -235,15 +240,17 @@ class ThumbnailCache:
                         "(WEATHERCAMS_IMAGE_MAX)", len(stations), ws.image_max)
         return stations[:ws.image_max]
 
-    async def refresh(self, fc: Dict[str, Any], ws: WeathercamSettings,
-                      headers: Mapping[str, str]) -> Dict[str, bytes]:
-        """Fetch changed thumbnails (first camera of each station), at most
-        one request per image_request_gap seconds. Returns the images."""
-        stations = self.selected(fc, ws)
-        wanted = {s["id"] for s in stations}
-        for sid in set(self.images) - wanted:
+    def prune(self, wanted: List[str]) -> None:
+        """Forget stations that no longer get a thumbnail."""
+        for sid in set(self.images) - set(wanted):
             self.images.pop(sid, None)
             self._etags.pop(sid, None)
+
+    async def refresh(self, stations: List[Dict[str, Any]], ws: WeathercamSettings,
+                      headers: Mapping[str, str]) -> Tuple[Dict[str, bytes], int]:
+        """Fetch changed thumbnails (first camera of each station), at most
+        one request per image_request_gap seconds. Returns the latest image
+        of each of these stations and how many were new."""
         fetched = 0
         for i, station in enumerate(stations):
             if i:
@@ -262,9 +269,7 @@ class ThumbnailCache:
                 if etag:
                     self._etags[station["id"]] = etag
                 fetched += 1
-        if stations:
-            LOG.info("thumbnails: %d stations, %d new", len(self.images), fetched)
-        return dict(self.images)
+        return {s["id"]: self.images[s["id"]] for s in stations if s["id"] in self.images}, fetched
 
 
 def file_name(station_id: str) -> str:
@@ -293,6 +298,19 @@ def mission_files(mission: Mapping[str, Any]) -> Dict[str, str]:
     return files
 
 
+def marker_attachments(mission: Mapping[str, Any]) -> Dict[str, str]:
+    """station id -> hash of the thumbnail its marker shows (get_mission data)."""
+    prefix = "digitraffic.weathercam."
+    out: Dict[str, str] = {}
+    for item in mission.get("uids", []) or []:
+        if not isinstance(item, dict) or not str(item.get("data", "")).startswith(prefix):
+            continue
+        attachments = (item.get("details") or {}).get("attachments") or []
+        if attachments:
+            out[str(item["data"])[len(prefix):]] = str(attachments[0]).lower()
+    return out
+
+
 class AttachmentSync:
     """Keeps one thumbnail file per station in the mission: uploads new
     pictures, adds them to the mission and removes the replaced ones."""
@@ -308,12 +326,11 @@ class AttachmentSync:
         return await self.server.connection.request(
             method, self.server.api_base_url + path, headers=headers, **kwargs)
 
-    async def upload(self, images: Mapping[str, bytes], mission: Mapping[str, Any],
-                     token: str) -> Tuple[Dict[str, str], List[str]]:
-        """Upload the pictures the mission does not have yet. Returns
-        station id -> hash for the markers and the hashes to remove once the
-        markers point at the new files."""
-        present = mission_files(mission)
+    async def upload(self, images: Mapping[str, bytes], present: Dict[str, str],
+                     token: str) -> Dict[str, str]:
+        """Upload the pictures the mission does not have yet (present: hash ->
+        name of the mission's thumbnails, updated here). Returns station id ->
+        hash for the pictures that are in the mission."""
         hashes: Dict[str, str] = {}
         new: Dict[str, str] = {}  # hash -> station id
         for sid, body in images.items():
@@ -346,14 +363,14 @@ class AttachmentSync:
                             len(new), status, str(result)[:200])
                 for digest, sid in new.items():
                     hashes.pop(sid, None)
-        in_use = set(hashes.values())
-        old = [digest for digest in present if digest not in in_use]
-        LOG.info("%s: %d thumbnails, %d new files, %d to remove", self.mission_name,
-                 len(hashes), len(new), len(old))
-        return hashes, old
+            else:
+                present.update({digest: file_name(sid) for digest, sid in new.items()})
+        return hashes
 
-    async def remove(self, digests: List[str], token: str, delete_files: bool) -> None:
-        """Remove replaced thumbnails from the mission (and the file store)."""
+    async def remove(self, digests: List[str], token: str, delete_files: bool) -> List[str]:
+        """Remove replaced thumbnails from the mission (and the file store).
+        Returns the hashes that left the mission."""
+        removed: List[str] = []
         for digest in digests:
             query = urllib.parse.urlencode({"hash": digest, "creatorUid": self.creator_uid})
             status, result = await self._request(
@@ -364,9 +381,11 @@ class AttachmentSync:
                 LOG.warning("%s: removing file %s failed: HTTP %s %s", self.mission_name,
                             digest, status, str(result)[:200])
                 continue
+            removed.append(digest)
             if delete_files:
                 status, result = await self._request(
                     "delete", f"/Marti/sync/delete?{urllib.parse.urlencode({'Hash': digest})}")
                 if status != 200:
                     LOG.debug("%s: deleting stored file %s: HTTP %s %s", self.mission_name,
                               digest, status, str(result)[:200])
+        return removed

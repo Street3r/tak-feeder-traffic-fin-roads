@@ -318,8 +318,8 @@ class MissionSync:
         self.hashes = {sid: h for sid, h in self.hashes.items() if sid in ids and h in present}
         uploaded = await self._sync_items(
             mission, weathercam.build_cot_files(fc, ws, name, self.hashes))
-        # files of stations that left the image area or of a failed round
-        await self._remove_unused(present)
+        # files of stations that left the image area or of an interrupted round
+        await self._remove_unused(present, announce=True)
         headers = digitraffic_headers(self.s.digitraffic_user, "tak-feeder-traffic-fin-roads",
                                       __version__)
         batches = [stations[i:i + ws.image_batch]
@@ -340,12 +340,16 @@ class MissionSync:
                         name, number, len(batches), fetched, len(changed), len(removed))
         return uploaded
 
-    async def _remove_unused(self, present: Dict[str, str]) -> List[str]:
+    async def _remove_unused(self, present: Dict[str, str], announce: bool = False
+                             ) -> List[str]:
         """Remove thumbnails no marker points at any more."""
         in_use = set((self.hashes or {}).values())
         unused = [digest for digest in present if digest not in in_use]
         if not unused:
             return []
+        if announce:
+            logger.info("%s: removing %d files no marker uses", self.ds.mission_name,
+                        len(unused))
         removed = await self.attachments.remove(unused, self.ds.token,
                                                 self.s.weathercam.delete_old_files)
         for digest in removed:

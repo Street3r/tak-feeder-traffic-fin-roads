@@ -61,7 +61,7 @@ class AttachmentTest(unittest.TestCase):
         files = weathercam.build_cot_files(fc, weathercam.WeathercamSettings(), "M",
                                            {"C1": "ab12"})
         ev = ET.fromstring(files["digitraffic.weathercam.C1"])
-        self.assertEqual(ev.get("type"), "b-m-p-s-p-loc")
+        self.assertEqual(ev.get("type"), "b-i-x-i")
         self.assertEqual(ev.find("detail/attachment_list").get("hashes"), '["ab12"]')
         self.assertIsNone(ev.find("detail/image"))
         other = ET.fromstring(files["digitraffic.weathercam.C2"])
@@ -171,7 +171,7 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(s.weathercam.image_max, 900)
         self.assertEqual(s.weathercam.image_batch, 20)
         self.assertTrue(s.weathercam.delete_old_files)
-        self.assertEqual(s.weathercam.cot_type, "b-m-p-s-p-loc")
+        self.assertEqual(s.weathercam.cot_type, "b-i-x-i")
 
     def test_bad_bbox(self) -> None:
         with mock.patch.dict("os.environ", {"WEATHERCAMS_BBOX": "a,b,c,d"}, clear=True):

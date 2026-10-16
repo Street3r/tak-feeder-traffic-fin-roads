@@ -52,17 +52,17 @@ own mission, so it can have its own group, for example
 cameras to several groups without nested groups). The remarks list each camera
 direction with a link to its latest image
 (`https://weathercam.digitraffic.fi/<presetId>.jpg`); the link always
-serves the newest picture (updated about every 10 minutes), so the TAK
-server carries no images and ATAK loads one only when the user opens it.
-The device needs internet access for that.
+serves the newest picture (updated about every 10 minutes); opening a link
+needs internet access on the device. Stations in `WEATHERCAMS_IMAGE_BBOX`
+also carry a thumbnail through the TAK server (below).
 
 Only stations and directions in collection are sent. The station list is
 fetched every `WEATHERCAMS_UPDATE_INTERVAL` seconds, and the mission changes
 only when stations come or go. UID `digitraffic.weathercam.<stationId>`,
 tags `#weather #weathercam`.
 
-Markers use CoT type `b-m-p-s-p-loc` (sensor point), which ATAK draws with
-its own sensor icon; Quick Pic (`b-i-x-i`) is left for users' own photos.
+Markers use CoT type `b-i-x-i` (Quick Pic), so ATAK shows the attached
+thumbnail on the marker; a sensor point (`b-m-p-s-p-loc`) did not show it.
 Stations inside `WEATHERCAMS_IMAGE_BBOX` also get the thumbnail of their
 first camera as a mission file, `weathercam_<stationId>.jpg`, linked to the
 marker with `<attachment_list hashes='["<sha256>"]'/>` so ATAK lists it
@@ -114,7 +114,7 @@ tested: opening the links in the remarks.
 | `WEATHERCAMS_IMAGE_MAX` | `100` | Most stations with a thumbnail (`WEATHERCAMS_EMBED_MAX` also works) |
 | `WEATHERCAMS_IMAGE_BATCH` | `50` | Stations per batch of thumbnails sent to the mission |
 | `WEATHERCAMS_DELETE_OLD_FILES` | `1` | Also delete replaced thumbnails from the server's file store |
-| `WEATHERCAMS_COT_TYPE` | `b-m-p-s-p-loc` | CoT type of the camera markers |
+| `WEATHERCAMS_COT_TYPE` | `b-i-x-i` | CoT type of the camera markers |
 | `WEATHERCAMS_ICON` | none | Optional ATAK iconset path instead of the type's icon |
 | `WEATHERCAMS_STALE_DAYS` | `365` | Stale time; removal from the mission hides a station |
 | `TIMEZONE` | `Europe/Helsinki` | Time zone of the validity times in the remarks |
@@ -175,7 +175,7 @@ Changes in this fork (Street3r):
     events and dropped the oldest when full, so rounds of more than 100
     lost the rest.
 - 2026-10-16 (draft)
-  - `weathercams` dataset: one sensor marker per Digitraffic weather camera
+  - `weathercams` dataset: one Quick Pic marker per Digitraffic weather camera
     station in its own mission; optional thumbnails as mission files linked
     to the marker, the previous file removed when a new one arrives;
     thumbnails sent in batches of 50 stations as they are fetched.

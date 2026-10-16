@@ -50,9 +50,9 @@ class WeathercamSettings:
 
     bbox: Optional[Tuple[float, float, float, float]] = None  # west, south, east, north
     thumbnails: bool = False
-    # Sensor point; ATAK draws it with its own sensor (camcorder) icon.
-    # Quick Pic (b-i-x-i) is left for photos taken by users.
-    cot_type: str = "b-m-p-s-p-loc"
+    # Quick Pic: ATAK shows the attached thumbnail on the marker. A sensor
+    # point (b-m-p-s-p-loc, camcorder icon) did not show attachments.
+    cot_type: str = "b-i-x-i"
     # Stations in this area get the thumbnail of their first camera as a
     # mission file attached to the marker. None = no images.
     image_bbox: Optional[Tuple[float, float, float, float]] = None
@@ -160,7 +160,7 @@ def station_remarks(station: Dict[str, Any], ws: WeathercamSettings) -> str:
     for i, preset in enumerate(station["presets"], 1):
         url = IMAGE_URL.format(preset=preset["id"]) + suffix
         lines.append(f"{_preset_label(preset, i)}: {url}")
-    lines.append("Latest image, updated about every 10 minutes")
+    lines.append("The links show the latest image, updated about every 10 minutes")
     return remarks_text(lines, SOURCE_LINE, ["weather", "weathercam"])
 
 

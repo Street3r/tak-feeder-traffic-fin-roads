@@ -64,6 +64,8 @@ class WeathercamSettings:
     # Also delete replaced thumbnails from the server's file store, not only
     # from the mission
     delete_old_files: bool = True
+    # Mission removals sent at the same time (TAK removes one file a request)
+    delete_parallel: int = 5
     # Digitraffic allows 60 image requests a minute per IP
     image_request_gap: float = 1.1
     icon: str = ""
@@ -83,6 +85,8 @@ class WeathercamSettings:
             image_max=int(env_float("WEATHERCAMS_IMAGE_MAX",
                                     env_float("WEATHERCAMS_EMBED_MAX", d.image_max))),
             image_batch=max(1, int(env_float("WEATHERCAMS_IMAGE_BATCH", d.image_batch))),
+            delete_parallel=max(1, int(env_float("WEATHERCAMS_DELETE_PARALLEL",
+                                                 d.delete_parallel))),
             delete_old_files=env_bool("WEATHERCAMS_DELETE_OLD_FILES", d.delete_old_files),
             thumbnails=env_bool("WEATHERCAMS_THUMBNAILS", d.thumbnails),
             cot_type=env("WEATHERCAMS_COT_TYPE", d.cot_type),
@@ -367,25 +371,30 @@ class AttachmentSync:
                 present.update({digest: file_name(sid) for digest, sid in new.items()})
         return hashes
 
-    async def remove(self, digests: List[str], token: str, delete_files: bool) -> List[str]:
-        """Remove replaced thumbnails from the mission (and the file store).
-        Returns the hashes that left the mission."""
-        removed: List[str] = []
-        for digest in digests:
-            query = urllib.parse.urlencode({"hash": digest, "creatorUid": self.creator_uid})
-            status, result = await self._request(
-                "delete",
-                f"/Marti/api/missions/{urllib.parse.quote(self.mission_name)}/contents?{query}",
-                token=token)
-            if status != 200:
-                LOG.warning("%s: removing file %s failed: HTTP %s %s", self.mission_name,
-                            digest, status, str(result)[:200])
-                continue
-            removed.append(digest)
-            if delete_files:
+    async def remove(self, digests: List[str], token: str, delete_files: bool,
+                     parallel: int = 1) -> List[str]:
+        """Remove replaced thumbnails from the mission (and the file store),
+        `parallel` at a time. Returns the hashes that left the mission."""
+        limit = asyncio.Semaphore(max(1, parallel))
+
+        async def one(digest: str) -> bool:
+            async with limit:
+                query = urllib.parse.urlencode({"hash": digest, "creatorUid": self.creator_uid})
                 status, result = await self._request(
-                    "delete", f"/Marti/sync/delete?{urllib.parse.urlencode({'Hash': digest})}")
+                    "delete",
+                    f"/Marti/api/missions/{urllib.parse.quote(self.mission_name)}/contents?{query}",
+                    token=token)
                 if status != 200:
-                    LOG.debug("%s: deleting stored file %s: HTTP %s %s", self.mission_name,
-                              digest, status, str(result)[:200])
-        return removed
+                    LOG.warning("%s: removing file %s failed: HTTP %s %s", self.mission_name,
+                                digest, status, str(result)[:200])
+                    return False
+                if delete_files:
+                    status, result = await self._request(
+                        "delete", f"/Marti/sync/delete?{urllib.parse.urlencode({'Hash': digest})}")
+                    if status != 200:
+                        LOG.debug("%s: deleting stored file %s: HTTP %s %s", self.mission_name,
+                                  digest, status, str(result)[:200])
+                return True
+
+        done = await asyncio.gather(*(one(digest) for digest in digests))
+        return [digest for digest, ok in zip(digests, done) if ok]

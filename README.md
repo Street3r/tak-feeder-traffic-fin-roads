@@ -113,6 +113,7 @@ tested: opening the links in the remarks.
 | `WEATHERCAMS_IMAGE_BBOX` | none | Area `west,south,east,north` whose stations get their thumbnail as a mission file; empty = none (`WEATHERCAMS_EMBED_BBOX` also works) |
 | `WEATHERCAMS_IMAGE_MAX` | `100` | Most stations with a thumbnail (`WEATHERCAMS_EMBED_MAX` also works) |
 | `WEATHERCAMS_IMAGE_BATCH` | `50` | Stations per batch of thumbnails sent to the mission |
+| `WEATHERCAMS_DELETE_PARALLEL` | `5` | Replaced thumbnails removed from the mission at the same time |
 | `WEATHERCAMS_DELETE_OLD_FILES` | `1` | Also delete replaced thumbnails from the server's file store |
 | `WEATHERCAMS_COT_TYPE` | `b-i-x-i` | CoT type of the camera markers |
 | `WEATHERCAMS_ICON` | none | Optional ATAK iconset path instead of the type's icon |
@@ -178,7 +179,8 @@ Changes in this fork (Street3r):
   - `weathercams` dataset: one Quick Pic marker per Digitraffic weather camera
     station in its own mission; optional thumbnails as mission files linked
     to the marker, the previous file removed when a new one arrives;
-    thumbnails sent in batches of 50 stations as they are fetched.
+    thumbnails sent in batches of 50 stations as they are fetched, replaced
+    ones removed 5 at a time.
 
 - 2026-10-15
   - Draft: Digitraffic weather cameras as the `weathercams` dataset in their

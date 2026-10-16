@@ -142,6 +142,24 @@ class AttachmentTest(unittest.TestCase):
         self.assertEqual(asyncio.run(sync.upload({"C1": b"NEW"}, present, "tok")), {})
         self.assertEqual(present, {})
 
+    def test_parallel_remove(self) -> None:
+        running, peak = 0, 0
+
+        async def request(method, url, **kw):
+            nonlocal running, peak
+            running += 1
+            peak = max(peak, running)
+            await asyncio.sleep(0)
+            running -= 1
+            return (500, "x") if "hash=bad" in url else (200, "{}")
+        server = mock.Mock(api_base_url="https://tak:8443")
+        server.connection.request = request
+        sync = weathercam.AttachmentSync(server, "M", "roads.0001")
+        digests = [f"h{i}" for i in range(12)] + ["bad"]
+        removed = asyncio.run(sync.remove(digests, "tok", delete_files=False, parallel=5))
+        self.assertEqual(removed, digests[:-1])
+        self.assertEqual(peak, 5)
+
     def test_marker_attachments(self) -> None:
         mission = {"uids": [
             {"data": "digitraffic.weathercam.C1", "details": {"attachments": ["ABC"]}},
@@ -156,7 +174,7 @@ class SettingsTest(unittest.TestCase):
                "WEATHERCAMS_MISSION_GROUP": "WEATHERCAM",
                "WEATHERCAMS_BBOX": "19,59,32,71", "WEATHERCAMS_THUMBNAILS": "1",
                "WEATHERCAMS_EMBED_BBOX": "24.5,60.1,25.3,60.4", "WEATHERCAMS_IMAGE_MAX": "900",
-               "WEATHERCAMS_IMAGE_BATCH": "20"}
+               "WEATHERCAMS_IMAGE_BATCH": "20", "WEATHERCAMS_DELETE_PARALLEL": "3"}
         with mock.patch.dict("os.environ", env, clear=True):
             s = feeder.Settings.from_env()
         cams = s.datasets[1]
@@ -170,6 +188,7 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(s.weathercam.image_bbox, (24.5, 60.1, 25.3, 60.4))
         self.assertEqual(s.weathercam.image_max, 900)
         self.assertEqual(s.weathercam.image_batch, 20)
+        self.assertEqual(s.weathercam.delete_parallel, 3)
         self.assertTrue(s.weathercam.delete_old_files)
         self.assertEqual(s.weathercam.cot_type, "b-i-x-i")
 

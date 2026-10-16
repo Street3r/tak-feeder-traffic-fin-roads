@@ -351,7 +351,8 @@ class MissionSync:
             logger.info("%s: removing %d files no marker uses", self.ds.mission_name,
                         len(unused))
         removed = await self.attachments.remove(unused, self.ds.token,
-                                                self.s.weathercam.delete_old_files)
+                                                self.s.weathercam.delete_old_files,
+                                                self.s.weathercam.delete_parallel)
         for digest in removed:
             present.pop(digest, None)
         return removed

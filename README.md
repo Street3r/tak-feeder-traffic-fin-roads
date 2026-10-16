@@ -24,6 +24,7 @@ by Stefan Gofferje.
 | `roadworks` | road works with work types and restrictions | `TrafficFinRoadworks` | `Roadwork` |
 | `weight-restrictions` | weight limits (e.g. bridges) | `TrafficFinWeightRestrictions` | `Weight limit` |
 | `exempted-transports` | oversize transports | `TrafficFinExemptedTransports` | `Exempted transport` |
+| `weathercams` | weather cameras, links to the latest images | `WeatherCamsFin` | `CAM <station>` |
 
 ### Groups
 
@@ -42,6 +43,43 @@ A user who activates only `CONSTRUCTION` in Channels sees the road works; a
 member of `TRAFFIC` sees all three missions. The groups apply when a mission
 is created. For an existing mission change them in the TAK admin UI, or
 delete the mission so the feeder recreates it.
+
+### Weather cameras (draft)
+
+`weathercams` puts one marker per Digitraffic weather camera station in its
+own mission, so it can have its own group, for example
+`WEATHERCAMS_MISSION_GROUP=WEATHERCAM` (a comma-separated list shows the
+cameras to several groups without nested groups). The remarks list each camera
+direction with a link to its latest image
+(`https://weathercam.digitraffic.fi/<presetId>.jpg`); the link always
+serves the newest picture (updated about every 10 minutes); opening a link
+needs internet access on the device. Stations in `WEATHERCAMS_IMAGE_BBOX`
+also carry a thumbnail through the TAK server (below).
+
+Only stations and directions in collection are sent. The station list is
+fetched every `WEATHERCAMS_UPDATE_INTERVAL` seconds, and the mission changes
+only when stations come or go. UID `digitraffic.weathercam.<stationId>`,
+tags `#weather #weathercam`.
+
+Markers use CoT type `b-i-x-i` (Quick Pic), so ATAK shows the attached
+thumbnail on the marker; a sensor point (`b-m-p-s-p-loc`) did not show it.
+Stations inside `WEATHERCAMS_IMAGE_BBOX` also get the thumbnail of their
+first camera as a mission file, `weathercam_<stationId>.jpg`, linked to the
+marker with `<attachment_list hashes='["<sha256>"]'/>` so ATAK lists it
+under the marker's attachments. Thumbnails are fetched with ETags, at most
+one request per 1.1 s (Digitraffic allows 60 image requests a minute). A new
+picture is uploaded to the server's file store, added to the mission and the
+marker re-sent with its hash; the station's previous file is then removed
+from the mission (and from the file store, `WEATHERCAMS_DELETE_OLD_FILES`).
+Only files named `weathercam_*` are touched. An unchanged picture sends
+nothing. The pictures go out in batches of `WEATHERCAMS_IMAGE_BATCH`
+stations as they are fetched (50 stations take about a minute), so phones
+get a steady trickle of small mission changes instead of the whole round
+(about 800 new files, markers and removals) at once. Experimental: an earlier test embedded the picture in the CoT
+(`<image>`), which ATAK then offered to publish back to the mission.
+
+Tested on a TAK 5.8 test server: 812 stations, 2266 cameras. Not yet
+tested: opening the links in the remarks.
 
 ## What it sends
 
@@ -69,6 +107,17 @@ delete the mission so the feeder recreates it.
 | `MY_UID` | `roads.0001` | Creator UID |
 | `COT_TYPE` / `COT_TYPE_LINE` / `COT_HOW` | `a-n-G` / `u-d-f` / `h-e` | CoT types |
 | `ICONSET_PATH` | caution icon | Default icon |
+| `WEATHERCAMS_UPDATE_INTERVAL` | `600` | Seconds between weather camera syncs (`<DATASET>_UPDATE_INTERVAL` works for every dataset) |
+| `WEATHERCAMS_BBOX` | all of Finland | Area `west,south,east,north`, e.g. `22,60,26,62` |
+| `WEATHERCAMS_THUMBNAILS` | `0` | `1` = link the small images (`?thumbnail=true`) |
+| `WEATHERCAMS_IMAGE_BBOX` | none | Area `west,south,east,north` whose stations get their thumbnail as a mission file; empty = none (`WEATHERCAMS_EMBED_BBOX` also works) |
+| `WEATHERCAMS_IMAGE_MAX` | `100` | Most stations with a thumbnail (`WEATHERCAMS_EMBED_MAX` also works) |
+| `WEATHERCAMS_IMAGE_BATCH` | `50` | Stations per batch of thumbnails sent to the mission |
+| `WEATHERCAMS_DELETE_PARALLEL` | `5` | Replaced thumbnails removed from the mission at the same time |
+| `WEATHERCAMS_DELETE_OLD_FILES` | `1` | Also delete replaced thumbnails from the server's file store |
+| `WEATHERCAMS_COT_TYPE` | `b-i-x-i` | CoT type of the camera markers |
+| `WEATHERCAMS_ICON` | none | Optional ATAK iconset path instead of the type's icon |
+| `WEATHERCAMS_STALE_DAYS` | `365` | Stale time; removal from the mission hides a station |
 | `TIMEZONE` | `Europe/Helsinki` | Time zone of the validity times in the remarks |
 | `UPDATE_INTERVAL` | `60` | Seconds between syncs of one dataset |
 | `RETRY_INTERVAL` | `300` | Wait after a failed sync |
@@ -126,6 +175,16 @@ Changes in this fork (Street3r):
   - Every event of a send round reaches TAK. pytak's send queue holds 100
     events and dropped the oldest when full, so rounds of more than 100
     lost the rest.
+- 2026-10-16 (draft)
+  - `weathercams` dataset: one Quick Pic marker per Digitraffic weather camera
+    station in its own mission; optional thumbnails as mission files linked
+    to the marker, the previous file removed when a new one arrives;
+    thumbnails sent in batches of 50 stations as they are fetched, replaced
+    ones removed 5 at a time.
+
+- 2026-10-15
+  - Draft: Digitraffic weather cameras as the `weathercams` dataset in their
+    own mission and group.
 
 ## License
 

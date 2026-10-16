@@ -11,8 +11,8 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import cot_utils, digitraffic
-from .common import Health, env, env_float, env_list
+from . import __version__, cot_utils, digitraffic, weathercam
+from .common import Health, digitraffic_headers, env, env_float, env_list
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +21,12 @@ DEFAULT_MISSIONS = {
     "roadworks": "TrafficFinRoadworks",
     "weight-restrictions": "TrafficFinWeightRestrictions",
     "exempted-transports": "TrafficFinExemptedTransports",
+    "weathercams": "WeatherCamsFin",
+}
+
+# Datasets that are not Digitraffic traffic messages: URL and default interval (s)
+OTHER_SOURCES = {
+    "weathercams": (weathercam.STATIONS_URL, 600.0),
 }
 
 
@@ -33,6 +39,7 @@ class Dataset:
     mission_name: str
     groups: List[str] = field(default_factory=list)
     token: str = ""
+    interval: float = 0.0  # 0 = UPDATE_INTERVAL
 
 
 @dataclass
@@ -52,6 +59,8 @@ class Settings:
     iconset_path: str = "6d781afb-89a6-4c07-b2b9-a89748b6a38f/Transport/caution.png"
     timezone: str = "Europe/Helsinki"
     datasets: List[Dataset] = field(default_factory=list)
+    weathercam: weathercam.WeathercamSettings = field(
+        default_factory=weathercam.WeathercamSettings)
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -72,11 +81,13 @@ class Settings:
                     env("MISSION_TOKEN", "")))
             else:
                 prefix = name.upper().replace("-", "_")
+                url, interval = OTHER_SOURCES.get(name, (f"{digitraffic.BASE_URL}/{name}", 0.0))
                 datasets.append(Dataset(
-                    name, f"{digitraffic.BASE_URL}/{name}",
+                    name, url,
                     env(f"{prefix}_MISSION_NAME", DEFAULT_MISSIONS[name]),
                     env_list(f"{prefix}_MISSION_GROUP", ""),
-                    env(f"{prefix}_MISSION_TOKEN", "")))
+                    env(f"{prefix}_MISSION_TOKEN", ""),
+                    env_float(f"{prefix}_UPDATE_INTERVAL", interval)))
         return cls(
             api_host=env("API_HOST", ""),
             cert=env("PYTAK_TLS_CLIENT_CERT", ""),
@@ -91,6 +102,7 @@ class Settings:
             iconset_path=env("ICONSET_PATH", d.iconset_path),
             timezone=env("TIMEZONE", d.timezone),
             datasets=datasets,
+            weathercam=weathercam.WeathercamSettings.from_env(),
         )
 
 
@@ -138,7 +150,8 @@ def _points(values: List[Tuple[str, str]]) -> Tuple[Tuple[float, float], ...]:
 
 def cot_signature(event: ET.Element) -> Tuple[Any, ...]:
     """What ATAK shows of a CoT item: type, position, label, remarks, icon,
-    colour and line points. Times are left out, they change every round."""
+    colour, line points and attached files. Times are left out, they change
+    every round."""
     point = event.find("point")
     detail = event.find("detail")
 
@@ -156,7 +169,15 @@ def cot_signature(event: ET.Element) -> Tuple[Any, ...]:
         attr("usericon", "iconsetpath"),
         attr("color", "argb"),
         _points([tuple(l.get("point", ",").split(",", 1)) for l in links]),  # type: ignore[misc]
+        _attachments(detail),
     )
+
+
+def _attachments(detail: Optional[ET.Element]) -> str:
+    """Hashes of the attached mission files, so a new picture counts as a change."""
+    el = detail.find("attachment_list") if detail is not None else None
+    hashes = el.get("hashes", "") if el is not None else ""
+    return "".join(c for c in hashes if c.isalnum() or c == ",").lower()
 
 
 def parse_signatures(xml: Any) -> Optional[Dict[str, Tuple[Any, ...]]]:
@@ -178,6 +199,10 @@ class MissionSync:
 
     def __init__(self, s: Settings, ds: Dataset, server: Any, build_package: Any) -> None:
         self.s, self.ds, self.server, self.build_package = s, ds, server, build_package
+        self.thumbnails = weathercam.ThumbnailCache()
+        self.attachments = weathercam.AttachmentSync(server, ds.mission_name, s.my_uid)
+        # station id -> thumbnail hash the marker points at
+        self.hashes: Optional[Dict[str, str]] = None
 
     async def _create(self) -> None:
         group: Any = self.ds.groups or ""  # a list becomes repeated group=
@@ -242,11 +267,17 @@ class MissionSync:
             raise RuntimeError(f"cannot get mission {self.ds.mission_name}: HTTP {status}")
 
         fc = await digitraffic.fetch_geojson(self.ds.url, self.s.digitraffic_user)
+        if self.ds.name == "weathercams":
+            return await self._run_weathercams(mission["data"][0], fc)
         candidates = digitraffic.extract_cot_candidates(fc, self.ds.name, self.s.timezone)
         files = build_cot_files(candidates, self.s, self.ds.mission_name)
+        return await self._sync_items(mission["data"][0], files)
+
+    async def _sync_items(self, mission: Dict[str, Any], files: Dict[str, Any]) -> bool:
+        """Remove items that left the dataset and upload new or changed ones.
+        True if a package was uploaded."""
         wanted = set(files)
-        present = {u.get("data") for u in mission["data"][0].get("uids", [])
-                   if isinstance(u, dict)}
+        present = {u.get("data") for u in mission.get("uids", []) if isinstance(u, dict)}
         for uid in sorted(present - wanted):
             logger.info("%s: removing %s", self.ds.mission_name, uid)
             s, r = await self.server.mission.remove_mission_content(
@@ -258,17 +289,73 @@ class MissionSync:
         if not upload:
             logger.info("%s: %d items, no changes", self.ds.mission_name, len(wanted))
             return False
+        logger.info("%s: uploading %d of %d items", self.ds.mission_name,
+                    len(upload), len(files))
+        await self._upload_package(upload)
+        return True
+
+    async def _upload_package(self, cot_files: Dict[str, Any]) -> None:
         package = self.build_package(
             name=self.ds.mission_name, mission_name=self.ds.mission_name,
             mission_server=f"{self.s.api_host}:8443:ssl", creator_uid=self.s.my_uid,
-            cot_files=upload, groups=self.ds.groups or None)
-        logger.info("%s: uploading %d of %d items", self.ds.mission_name,
-                    len(upload), len(files))
+            cot_files=cot_files, groups=self.ds.groups or None)
         s, r = await self.server.mission.add_mission_package(
             self.ds.mission_name, self.s.my_uid, self.ds.token, package)
         if s != 200:
             raise RuntimeError(f"package upload to {self.ds.mission_name} failed: HTTP {s} {r}")
-        return True
+
+    async def _run_weathercams(self, mission: Dict[str, Any], fc: Dict[str, Any]) -> bool:
+        """Sync the station markers, then send the thumbnails in batches as
+        they are fetched: each batch uploads its new pictures, points its
+        markers at them and removes the pictures they replaced."""
+        ws, name = self.s.weathercam, self.ds.mission_name
+        present = weathercam.mission_files(mission)  # hash -> file name
+        if self.hashes is None:  # after a restart: what the markers show now
+            self.hashes = weathercam.marker_attachments(mission)
+        stations = self.thumbnails.selected(fc, ws)
+        ids = [st["id"] for st in stations]
+        self.thumbnails.prune(ids)
+        self.hashes = {sid: h for sid, h in self.hashes.items() if sid in ids and h in present}
+        uploaded = await self._sync_items(
+            mission, weathercam.build_cot_files(fc, ws, name, self.hashes))
+        # files of stations that left the image area or of an interrupted round
+        await self._remove_unused(present, announce=True)
+        headers = digitraffic_headers(self.s.digitraffic_user, "tak-feeder-traffic-fin-roads",
+                                      __version__)
+        batches = [stations[i:i + ws.image_batch]
+                   for i in range(0, len(stations), ws.image_batch)]
+        for number, batch in enumerate(batches, 1):
+            images, fetched = await self.thumbnails.refresh(batch, ws, headers)
+            hashes = await self.attachments.upload(images, present, self.ds.token)
+            changed = {sid: h for sid, h in hashes.items() if self.hashes.get(sid) != h}
+            if changed:
+                await self._upload_package({
+                    f"digitraffic.weathercam.{st['id']}": weathercam.station_cot(
+                        st, ws, name, attachment=changed[st["id"]])
+                    for st in batch if st["id"] in changed})
+                self.hashes.update(changed)
+                uploaded = True
+            removed = await self._remove_unused(present)
+            logger.info("%s: images %d/%d: %d fetched, %d markers updated, %d files removed",
+                        name, number, len(batches), fetched, len(changed), len(removed))
+        return uploaded
+
+    async def _remove_unused(self, present: Dict[str, str], announce: bool = False
+                             ) -> List[str]:
+        """Remove thumbnails no marker points at any more."""
+        in_use = set((self.hashes or {}).values())
+        unused = [digest for digest in present if digest not in in_use]
+        if not unused:
+            return []
+        if announce:
+            logger.info("%s: removing %d files no marker uses", self.ds.mission_name,
+                        len(unused))
+        removed = await self.attachments.remove(unused, self.ds.token,
+                                                self.s.weathercam.delete_old_files,
+                                                self.s.weathercam.delete_parallel)
+        for digest in removed:
+            present.pop(digest, None)
+        return removed
 
 
 async def run(s: Settings, server: Any, build_package: Any,
@@ -288,7 +375,7 @@ async def run(s: Settings, server: Any, build_package: Any,
                     health.ok()
                 if uploaded:
                     await asyncio.sleep(30)  # ATAK DataSync needs time (upstream note)
-                next_run[sync.ds.name] = loop.time() + s.update_interval
+                next_run[sync.ds.name] = loop.time() + (sync.ds.interval or s.update_interval)
             except Exception as exc:  # noqa: BLE001  pylint: disable=broad-exception-caught
                 logger.warning("%s: %s; retrying in %.0f s", sync.ds.mission_name, exc,
                                s.retry_interval)

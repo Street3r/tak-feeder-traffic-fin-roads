@@ -150,8 +150,8 @@ def _points(values: List[Tuple[str, str]]) -> Tuple[Tuple[float, float], ...]:
 
 def cot_signature(event: ET.Element) -> Tuple[Any, ...]:
     """What ATAK shows of a CoT item: type, position, label, remarks, icon,
-    colour, line points and attached files. Times are left out, they change
-    every round."""
+    colour, line points, attached files, video and sensor cone. Times are
+    left out, they change every round."""
     point = event.find("point")
     detail = event.find("detail")
 
@@ -170,6 +170,9 @@ def cot_signature(event: ET.Element) -> Tuple[Any, ...]:
         attr("color", "argb"),
         _points([tuple(l.get("point", ",").split(",", 1)) for l in links]),  # type: ignore[misc]
         _attachments(detail),
+        attr("__video", "url"),
+        attr("__video", "uid"),
+        tuple(attr("sensor", a) for a in ("azimuth", "fov", "range")),
     )
 
 
@@ -199,10 +202,8 @@ class MissionSync:
 
     def __init__(self, s: Settings, ds: Dataset, server: Any, build_package: Any) -> None:
         self.s, self.ds, self.server, self.build_package = s, ds, server, build_package
-        self.thumbnails = weathercam.ThumbnailCache()
-        self.attachments = weathercam.AttachmentSync(server, ds.mission_name, s.my_uid)
-        # station id -> thumbnail hash the marker points at
-        self.hashes: Optional[Dict[str, str]] = None
+        self.directions = weathercam.StationDirections(
+            get_json=lambda url: digitraffic.fetch_geojson(url, s.digitraffic_user))
 
     async def _create(self) -> None:
         group: Any = self.ds.groups or ""  # a list becomes repeated group=
@@ -305,57 +306,13 @@ class MissionSync:
             raise RuntimeError(f"package upload to {self.ds.mission_name} failed: HTTP {s} {r}")
 
     async def _run_weathercams(self, mission: Dict[str, Any], fc: Dict[str, Any]) -> bool:
-        """Sync the station markers, then send the thumbnails in batches as
-        they are fetched: each batch uploads its new pictures, points its
-        markers at them and removes the pictures they replaced."""
-        ws, name = self.s.weathercam, self.ds.mission_name
-        present = weathercam.mission_files(mission)  # hash -> file name
-        if self.hashes is None:  # after a restart: what the markers show now
-            self.hashes = weathercam.marker_attachments(mission)
-        stations = self.thumbnails.selected(fc, ws)
-        ids = [st["id"] for st in stations]
-        self.thumbnails.prune(ids)
-        self.hashes = {sid: h for sid, h in self.hashes.items() if sid in ids and h in present}
-        uploaded = await self._sync_items(
-            mission, weathercam.build_cot_files(fc, ws, name, self.hashes))
-        # files of stations that left the image area or of an interrupted round
-        await self._remove_unused(present, announce=True)
+        """One marker per camera direction with its video and view cone."""
+        ws = self.s.weathercam
         headers = digitraffic_headers(self.s.digitraffic_user, "tak-feeder-traffic-fin-roads",
                                       __version__)
-        batches = [stations[i:i + ws.image_batch]
-                   for i in range(0, len(stations), ws.image_batch)]
-        for number, batch in enumerate(batches, 1):
-            images, fetched = await self.thumbnails.refresh(batch, ws, headers)
-            hashes = await self.attachments.upload(images, present, self.ds.token)
-            changed = {sid: h for sid, h in hashes.items() if self.hashes.get(sid) != h}
-            if changed:
-                await self._upload_package({
-                    f"digitraffic.weathercam.{st['id']}": weathercam.station_cot(
-                        st, ws, name, attachment=changed[st["id"]])
-                    for st in batch if st["id"] in changed})
-                self.hashes.update(changed)
-                uploaded = True
-            removed = await self._remove_unused(present)
-            logger.info("%s: images %d/%d: %d fetched, %d markers updated, %d files removed",
-                        name, number, len(batches), fetched, len(changed), len(removed))
-        return uploaded
-
-    async def _remove_unused(self, present: Dict[str, str], announce: bool = False
-                             ) -> List[str]:
-        """Remove thumbnails no marker points at any more."""
-        in_use = set((self.hashes or {}).values())
-        unused = [digest for digest in present if digest not in in_use]
-        if not unused:
-            return []
-        if announce:
-            logger.info("%s: removing %d files no marker uses", self.ds.mission_name,
-                        len(unused))
-        removed = await self.attachments.remove(unused, self.ds.token,
-                                                self.s.weathercam.delete_old_files,
-                                                self.s.weathercam.delete_parallel)
-        for digest in removed:
-            present.pop(digest, None)
-        return removed
+        await self.directions.update(weathercam.extract_stations(fc, ws), ws, headers)
+        return await self._sync_items(
+            mission, weathercam.build_cot_files(fc, ws, self.ds.mission_name, self.directions))
 
 
 async def run(s: Settings, server: Any, build_package: Any,

@@ -370,7 +370,7 @@ def camera_remarks(station: Dict[str, Any], camera: Dict[str, Any]) -> str:
     label = str(camera.get("presentationName") or "").strip()
     lines: List[Optional[str]] = [
         f"Weather camera {station['name']}" + (f", {label}" if label else ""),
-        "The video shows the latest image, updated about every 10 minutes",
+        "The video shows the latest images, updated about every 10 minutes",
         f"Image: {IMAGE_URL.format(preset=camera['id'])}",
     ]
     if camera.get("azimuth") is None:

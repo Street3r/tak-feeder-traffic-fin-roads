@@ -3,45 +3,54 @@
 """
 Digitraffic weather cameras (kelikamerat) as mission items.
 
-One marker per camera station. The remarks link the latest image of each
-camera direction (preset); the image URL always serves the newest picture,
-so the items only change when stations enter or leave collection. ATAK
-fetches an image only when the user opens its link.
+One sensor marker per camera direction (preset). The marker opens the
+camera's latest image as a video stream (WEATHERCAMS_STREAM_URL, a MediaMTX
+server that fetches the image when someone opens the stream), and its view
+cone shows where the camera looks. No images go through TAK.
 
-Station list (GeoJSON FeatureCollection):
+Station list (GeoJSON FeatureCollection; presets without names):
   https://tie.digitraffic.fi/api/weathercam/v1/stations
+Station details (preset names, direction codes, road address):
+  https://tie.digitraffic.fi/api/weathercam/v1/stations/<stationId>
 Latest image of a preset: https://weathercam.digitraffic.fi/<presetId>.jpg
-(?thumbnail=true for a small one). Images update about every 10 minutes.
 
-The property names below follow the Digitraffic documentation (id, name,
-collectionStatus, presets[].id / inCollection). Not yet checked against a
-live response; unknown fields are ignored.
+Direction: a preset's `direction` tells where the camera looks relative to
+the road address: INCREASING_DIRECTION = towards growing road addresses,
+DECREASING_DIRECTION = the opposite (checked 2026-10-19 on roads 1, 3, 4, 7
+and 51, which start in Helsinki: "Helsinkiin" cameras are DECREASING). The
+road's bearing at the station comes from two road-address points 50 m apart,
+converted to coordinates by the Finnish Transport Infrastructure Agency's
+Viitekehysmuunnin (open API, ETRS-TM35FIN). Cameras on a crossing road and
+special or unknown directions get no view cone.
 """
 
 from __future__ import annotations
 
 import asyncio
-import hashlib
+import gzip
 import json
 import logging
+import math
+import time
 import urllib.parse
-import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
-from .common import cot_time, env, env_bool, env_float, env_list, remarks_text
+from .common import cot_time, env, env_float, env_list, remarks_text
 from .digitraffic import SOURCE_LINE
 
 LOG = logging.getLogger(__name__)
 
 STATIONS_URL = "https://tie.digitraffic.fi/api/weathercam/v1/stations"
+STATION_URL = STATIONS_URL + "/{station}"
 IMAGE_URL = "https://weathercam.digitraffic.fi/{preset}.jpg"
-# Name of a station's thumbnail in the mission; the feeder only touches files
-# with this prefix
-FILE_PREFIX = "weathercam_"
+ROAD_ADDRESS_URL = "https://avoinapi.vaylapilvi.fi/viitekehysmuunnin/muunna"
+UID_PREFIX = "digitraffic.weathercam."
+# Points per Viitekehysmuunnin batch request (the API allows 1000)
+ROAD_BATCH = 1000
 
 
 @dataclass
@@ -49,49 +58,47 @@ class WeathercamSettings:
     """WEATHERCAMS_* settings."""
 
     bbox: Optional[Tuple[float, float, float, float]] = None  # west, south, east, north
-    thumbnails: bool = False
-    # Quick Pic: ATAK shows the attached thumbnail on the marker. A sensor
-    # point (b-m-p-s-p-loc, camcorder icon) did not show attachments.
-    cot_type: str = "b-i-x-i"
-    # Stations in this area get the thumbnail of their first camera as a
-    # mission file attached to the marker. None = no images.
-    image_bbox: Optional[Tuple[float, float, float, float]] = None
-    image_max: int = 100
-    # Thumbnails are sent in batches of this many stations as they are
-    # fetched (about one batch a minute at the Digitraffic rate), so phones
-    # get a steady trickle instead of the whole round at once
-    image_batch: int = 50
-    # Also delete replaced thumbnails from the server's file store, not only
-    # from the mission
-    delete_old_files: bool = True
-    # Mission removals sent at the same time (TAK removes one file a request)
-    delete_parallel: int = 5
-    # Digitraffic allows 60 image requests a minute per IP
-    image_request_gap: float = 1.1
+    # Sensor point: camcorder icon, and ATAK draws the view cone of <sensor>
+    cot_type: str = "b-m-p-s-p-loc"
     icon: str = ""
-    # Mission items are re-sent only when the station set changes, so the
-    # stale time is long; removal from the mission hides a station.
+    # Mission items are re-sent only when something changes, so the stale
+    # time is long; removal from the mission hides a camera.
     stale_days: float = 365.0
+    # rtmps://<host>:<port>/wc; the preset id is appended. Empty = no video.
+    stream_url: str = ""
+    stream_user: str = ""
+    stream_password: str = ""
+    fov: float = 60.0      # horizontal view angle of the cone (degrees)
+    range_m: float = 250.0  # length of the cone (m)
+    # Markers of a station's directions are moved this far in the view
+    # direction so they do not lie on top of each other
+    offset_m: float = 20.0
+    # Station details and road bearings are fetched again after this
+    details_refresh_hours: float = 24.0
+    # Gap between station detail requests (s)
+    request_gap: float = 0.2
 
     @classmethod
     def from_env(cls) -> "WeathercamSettings":
         """Read WEATHERCAMS_* variables."""
         d = cls()
+        for old in ("WEATHERCAMS_IMAGE_BBOX", "WEATHERCAMS_EMBED_BBOX", "WEATHERCAMS_THUMBNAILS"):
+            if env(old, ""):
+                LOG.warning("%s is no longer used: images are streamed (WEATHERCAMS_STREAM_URL)",
+                            old)
         return cls(
             bbox=_bbox_env("WEATHERCAMS_BBOX"),
-            # WEATHERCAMS_EMBED_* are the names of the earlier embedded-image test
-            image_bbox=(_bbox_env("WEATHERCAMS_IMAGE_BBOX")
-                        or _bbox_env("WEATHERCAMS_EMBED_BBOX")),
-            image_max=int(env_float("WEATHERCAMS_IMAGE_MAX",
-                                    env_float("WEATHERCAMS_EMBED_MAX", d.image_max))),
-            image_batch=max(1, int(env_float("WEATHERCAMS_IMAGE_BATCH", d.image_batch))),
-            delete_parallel=max(1, int(env_float("WEATHERCAMS_DELETE_PARALLEL",
-                                                 d.delete_parallel))),
-            delete_old_files=env_bool("WEATHERCAMS_DELETE_OLD_FILES", d.delete_old_files),
-            thumbnails=env_bool("WEATHERCAMS_THUMBNAILS", d.thumbnails),
             cot_type=env("WEATHERCAMS_COT_TYPE", d.cot_type),
             icon=env("WEATHERCAMS_ICON", d.icon),
             stale_days=env_float("WEATHERCAMS_STALE_DAYS", d.stale_days),
+            stream_url=env("WEATHERCAMS_STREAM_URL", d.stream_url).rstrip("/"),
+            stream_user=env("WEATHERCAMS_STREAM_USER", d.stream_user),
+            stream_password=env("WEATHERCAMS_STREAM_PASSWORD", d.stream_password),
+            fov=env_float("WEATHERCAMS_FOV", d.fov),
+            range_m=env_float("WEATHERCAMS_RANGE", d.range_m),
+            offset_m=env_float("WEATHERCAMS_OFFSET", d.offset_m),
+            details_refresh_hours=env_float("WEATHERCAMS_DETAILS_REFRESH_HOURS",
+                                            d.details_refresh_hours),
         )
 
 
@@ -123,11 +130,6 @@ def _station_name(props: Dict[str, Any], fallback: str) -> str:
     return str(name or fallback).strip()
 
 
-def _preset_label(preset: Dict[str, Any], index: int) -> str:
-    label = preset.get("presentationName") or preset.get("direction")
-    return str(label).strip() if label else f"Camera {index}"
-
-
 def extract_stations(fc: Dict[str, Any], ws: WeathercamSettings) -> List[Dict[str, Any]]:
     """Stations in collection with their presets in collection."""
     stations: List[Dict[str, Any]] = []
@@ -157,244 +159,290 @@ def extract_stations(fc: Dict[str, Any], ws: WeathercamSettings) -> List[Dict[st
     return stations
 
 
-def station_remarks(station: Dict[str, Any], ws: WeathercamSettings) -> str:
-    """Station name, one image link per direction, source line, tags."""
-    suffix = "?thumbnail=true" if ws.thumbnails else ""
-    lines: List[Optional[str]] = [f"Weather camera {station['name']}"]
-    for i, preset in enumerate(station["presets"], 1):
-        url = IMAGE_URL.format(preset=preset["id"]) + suffix
-        lines.append(f"{_preset_label(preset, i)}: {url}")
-    lines.append("The links show the latest image, updated about every 10 minutes")
+# ------------------------------------------------------------------ geometry
+# ETRS-TM35FIN (UTM zone 35N on GRS80), the Viitekehysmuunnin coordinates
+_A = 6378137.0
+_F = 1 / 298.257222101
+_K0 = 0.9996
+_LON0 = math.radians(27.0)
+
+
+def to_tm35fin(lat_deg: float, lon_deg: float) -> Tuple[float, float]:
+    """WGS84 latitude/longitude -> ETRS-TM35FIN easting, northing (m)."""
+    e2 = _F * (2 - _F)
+    ep2 = e2 / (1 - e2)
+    lat, lon = math.radians(lat_deg), math.radians(lon_deg)
+    n = _A / math.sqrt(1 - e2 * math.sin(lat) ** 2)
+    t = math.tan(lat) ** 2
+    c = ep2 * math.cos(lat) ** 2
+    a = math.cos(lat) * (lon - _LON0)
+    m = _A * ((1 - e2 / 4 - 3 * e2 ** 2 / 64 - 5 * e2 ** 3 / 256) * lat
+              - (3 * e2 / 8 + 3 * e2 ** 2 / 32 + 45 * e2 ** 3 / 1024) * math.sin(2 * lat)
+              + (15 * e2 ** 2 / 256 + 45 * e2 ** 3 / 1024) * math.sin(4 * lat)
+              - (35 * e2 ** 3 / 3072) * math.sin(6 * lat))
+    x = 500000.0 + _K0 * n * (a + (1 - t + c) * a ** 3 / 6
+                              + (5 - 18 * t + t ** 2 + 72 * c - 58 * ep2) * a ** 5 / 120)
+    y = _K0 * (m + n * math.tan(lat) * (a ** 2 / 2 + (5 - t + 9 * c + 4 * c ** 2) * a ** 4 / 24
+                                        + (61 - 58 * t + t ** 2 + 600 * c - 330 * ep2)
+                                        * a ** 6 / 720))
+    return x, y
+
+
+def grid_bearing(p1: Tuple[float, float], p2: Tuple[float, float],
+                 lat: float, lon: float) -> float:
+    """True bearing (degrees) from TM35FIN point p1 to p2 near lat/lon."""
+    grid = math.degrees(math.atan2(p2[0] - p1[0], p2[1] - p1[1]))
+    convergence = math.degrees((math.radians(lon) - _LON0) * math.sin(math.radians(lat)))
+    return (grid + convergence) % 360
+
+
+def offset(lat: float, lon: float, azimuth: float, dist: float) -> Tuple[float, float]:
+    """The point dist metres from lat/lon towards azimuth."""
+    r = 6371000.0
+    d = dist / r
+    az = math.radians(azimuth)
+    lat1, lon1 = math.radians(lat), math.radians(lon)
+    lat2 = math.asin(math.sin(lat1) * math.cos(d) + math.cos(lat1) * math.sin(d) * math.cos(az))
+    lon2 = lon1 + math.atan2(math.sin(az) * math.sin(d) * math.cos(lat1),
+                             math.cos(d) - math.sin(lat1) * math.sin(lat2))
+    return math.degrees(lat2), math.degrees(lon2)
+
+
+def direction_sign(preset: Mapping[str, Any]) -> Optional[int]:
+    """+1 camera looks towards growing road addresses, -1 the other way,
+    None crossing road, special or unknown direction."""
+    direction = str(preset.get("direction") or "").upper()
+    code = str(preset.get("directionCode") or "")
+    if direction == "INCREASING_DIRECTION" or (not direction and code == "1"):
+        return 1
+    if direction == "DECREASING_DIRECTION" or (not direction and code == "2"):
+        return -1
+    return None
+
+
+# ------------------------------------------------------------------ details
+def _post_form(url: str, data: Mapping[str, str], headers: Mapping[str, str],
+               timeout: float = 60.0) -> bytes:
+    """POST a form (gzip accepted)."""
+    body = urllib.parse.urlencode(data).encode()
+    hdrs = {"Accept-Encoding": "gzip",
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8", **headers}
+    req = urllib.request.Request(url, data=body, headers=hdrs, method="POST")
+    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+        out: bytes = resp.read()
+        if resp.headers.get("Content-Encoding", "").lower() == "gzip":
+            out = gzip.decompress(out)
+    return out
+
+
+class StationDirections:
+    """Camera names and directions of each station (Digitraffic station
+    details) and the bearing of its road (Viitekehysmuunnin), kept for
+    WEATHERCAMS_DETAILS_REFRESH_HOURS."""
+
+    def __init__(self, get_json: Any = None, post: Any = _post_form,
+                 sleep: Any = asyncio.sleep, clock: Any = time.monotonic) -> None:
+        self._get_json, self._post, self._sleep, self._clock = get_json, post, sleep, clock
+        self.presets: Dict[str, Dict[str, Dict[str, Any]]] = {}  # station -> preset id -> data
+        self.road: Dict[str, Dict[str, Any]] = {}  # station -> roadAddress
+        self.bearing: Dict[str, Optional[float]] = {}  # station -> bearing of growing address
+        self._fetched: Dict[str, float] = {}
+
+    async def update(self, stations: List[Dict[str, Any]], ws: WeathercamSettings,
+                     headers: Mapping[str, str]) -> None:
+        """Fetch details of stations not seen or older than the refresh time,
+        then the road bearing of those stations."""
+        now = self._clock()
+        max_age = ws.details_refresh_hours * 3600
+        due = [st for st in stations
+               if now - self._fetched.get(st["id"], -math.inf) >= max_age]
+        if not due:
+            return
+        LOG.info("weather cameras: fetching details of %d stations", len(due))
+        fetched: List[Dict[str, Any]] = []
+        for i, st in enumerate(due):
+            if i:
+                await self._sleep(ws.request_gap)
+            try:
+                feature = await self._get_json(STATION_URL.format(station=st["id"]))
+            except Exception as exc:  # noqa: BLE001  pylint: disable=broad-exception-caught
+                LOG.warning("weather camera station %s: %s", st["id"], exc)
+                continue
+            props = feature.get("properties", feature) if isinstance(feature, dict) else {}
+            self.presets[st["id"]] = {str(p.get("id")): p for p in props.get("presets", []) or []
+                                      if isinstance(p, dict) and p.get("id")}
+            self.road[st["id"]] = props.get("roadAddress") or {}
+            self._fetched[st["id"]] = now
+            fetched.append(st)
+        try:
+            bearings = await self._road_bearings(fetched, headers)
+        except Exception as exc:  # noqa: BLE001  pylint: disable=broad-exception-caught
+            LOG.warning("weather cameras: road bearings not available: %s", exc)
+            bearings = {}
+        for st in fetched:
+            self.bearing[st["id"]] = bearings.get(st["id"])
+        LOG.info("weather cameras: road bearing for %d of %d stations",
+                 sum(1 for st in fetched if bearings.get(st["id"]) is not None), len(fetched))
+
+    async def _road_bearings(self, stations: List[Dict[str, Any]],
+                             headers: Mapping[str, str]) -> Dict[str, float]:
+        """station id -> bearing of growing road addresses at the station."""
+        wanted: Dict[str, Tuple[Dict[str, Any], int, int]] = {}
+        for st in stations:
+            ra = self.road.get(st["id"]) or {}
+            try:
+                road, part = int(ra["roadNumber"]), int(ra["roadSection"])
+                dist = int(ra.get("distanceFromRoadSectionStart") or 0)
+            except (KeyError, TypeError, ValueError):
+                continue
+            start = max(0, dist - 25)
+            wanted[st["id"]] = ({"tie": road, "osa": part,
+                                 "ajorata": 0 if ra.get("carriageway") == "ONE_CARRIAGEWAY"
+                                 else "1,2"}, start, start + 50)
+        points = await self._points(wanted, headers)
+        # A point past the end of the road part: use the 50 m before the station
+        retry = {sid: (q, max(0, end - 100), end - 50) for sid, (q, _, end) in wanted.items()
+                 if (sid, "b") not in points and (sid, "a") in points}
+        points.update(await self._points(retry, headers))
+        out: Dict[str, float] = {}
+        by_id = {st["id"]: st for st in stations}
+        for sid in wanted:
+            a, b = points.get((sid, "a")), points.get((sid, "b"))
+            if a and b and math.dist(a, b) > 5:
+                st = by_id[sid]
+                out[sid] = grid_bearing(a, b, st["lat"], st["lon"])
+        return out
+
+    async def _points(self, wanted: Mapping[str, Tuple[Dict[str, Any], int, int]],
+                      headers: Mapping[str, str]) -> Dict[Tuple[str, str], Tuple[float, float]]:
+        """(station id, "a"/"b") -> TM35FIN point of the two road addresses."""
+        queries = []
+        for sid, (q, first, second) in wanted.items():
+            for tag, dist in (("a", first), ("b", second)):
+                queries.append({**q, "etaisyys": dist, "palautusarvot": "1",
+                                "tunniste": f"{sid}:{tag}"})
+        points: Dict[Tuple[str, str], Tuple[float, float]] = {}
+        for i in range(0, len(queries), ROAD_BATCH):
+            chunk = json.dumps(queries[i:i + ROAD_BATCH], separators=(",", ":"))
+            body = await asyncio.to_thread(self._post, ROAD_ADDRESS_URL, {"json": chunk},
+                                           headers)
+            data = json.loads(body)
+            for feat in (data.get("features") or []) if isinstance(data, dict) else []:
+                props = feat.get("properties") or {}
+                sid, _, tag = str(props.get("tunniste", "")).rpartition(":")
+                if not sid or props.get("virheet") or (sid, tag) in points:
+                    continue
+                try:
+                    points[(sid, tag)] = (float(props["x"]), float(props["y"]))
+                except (KeyError, TypeError, ValueError):
+                    continue
+        return points
+
+    def cameras(self, station: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """The station's presets with name, direction and azimuth (None
+        when the camera's direction or the road's bearing is not known)."""
+        details = self.presets.get(station["id"], {})
+        bearing = self.bearing.get(station["id"])
+        out = []
+        for preset in station["presets"]:
+            info = {**preset, **details.get(str(preset["id"]), {})}
+            sign = direction_sign(info)
+            azimuth = None
+            if sign is not None and bearing is not None:
+                azimuth = bearing if sign > 0 else (bearing + 180) % 360
+            info["azimuth"] = azimuth
+            out.append(info)
+        return out
+
+
+# ------------------------------------------------------------------ CoT
+def stream_url(ws: WeathercamSettings, preset_id: str) -> str:
+    """Video URL of a preset, with the viewer account as query parameters."""
+    url = f"{ws.stream_url}/{preset_id}"
+    if ws.stream_user:
+        url += "?" + urllib.parse.urlencode({"user": ws.stream_user,
+                                             "pass": ws.stream_password})
+    return url
+
+
+def camera_remarks(station: Dict[str, Any], camera: Dict[str, Any]) -> str:
+    """Station, direction, image link, source line, tags."""
+    label = str(camera.get("presentationName") or "").strip()
+    lines: List[Optional[str]] = [
+        f"Weather camera {station['name']}" + (f", {label}" if label else ""),
+        "The video shows the latest image, updated about every 10 minutes",
+        f"Image: {IMAGE_URL.format(preset=camera['id'])}",
+    ]
+    if camera.get("azimuth") is None:
+        lines.append("Direction of view not known")
     return remarks_text(lines, SOURCE_LINE, ["weather", "weathercam"])
 
 
-def station_cot(station: Dict[str, Any], ws: WeathercamSettings, mission_name: str,
-                how: str = "h-e", now: Optional[datetime] = None,
-                attachment: Optional[str] = None) -> bytes:
-    """Mission item for one camera station; attachment = hash of the mission
-    file shown as the marker's attachment."""
+def camera_cot(station: Dict[str, Any], camera: Dict[str, Any], ws: WeathercamSettings,
+               mission_name: str, how: str = "h-e", now: Optional[datetime] = None) -> bytes:
+    """Mission item for one camera direction."""
     t = now or datetime.now(timezone.utc)
+    preset_id = str(camera["id"])
+    uid = UID_PREFIX + preset_id
+    lat, lon = station["lat"], station["lon"]
+    azimuth = camera.get("azimuth")
+    if azimuth is not None and ws.offset_m:
+        lat, lon = offset(lat, lon, azimuth, ws.offset_m)
     root = ET.Element("event", {
-        "version": "2.0", "type": ws.cot_type, "uid": f"digitraffic.weathercam.{station['id']}",
+        "version": "2.0", "type": ws.cot_type, "uid": uid,
         "how": how, "time": cot_time(t), "start": cot_time(t),
         "stale": cot_time(t + timedelta(days=ws.stale_days)),
     })
-    ET.SubElement(root, "point", {"lat": f"{station['lat']:.6f}", "lon": f"{station['lon']:.6f}",
+    ET.SubElement(root, "point", {"lat": f"{lat:.6f}", "lon": f"{lon:.6f}",
                                   "hae": "0", "ce": "10", "le": "10"})
     detail = ET.SubElement(root, "detail")
     marti = ET.SubElement(detail, "marti")
     ET.SubElement(marti, "dest", {"mission": mission_name})
-    callsign = f"CAM {station['name']}"
-    ET.SubElement(detail, "contact", {"callsign": callsign[:40]})
+    label = str(camera.get("presentationName") or "").strip()
+    callsign = f"CAM {station['name']} {label}".strip()
+    ET.SubElement(detail, "contact", {"callsign": callsign})
     if ws.icon:
         ET.SubElement(detail, "usericon", {"iconsetpath": ws.icon})
-    ET.SubElement(detail, "remarks").text = station_remarks(station, ws)
-    if attachment:
-        # TAK links mission files to a map item through this list (as ATAK
-        # does for attachments a user publishes)
-        ET.SubElement(detail, "attachment_list", {"hashes": json.dumps([attachment])})
+    if ws.stream_url:
+        url = stream_url(ws, preset_id)
+        parts = urllib.parse.urlsplit(url)
+        path = parts.path + (f"?{parts.query}" if parts.query else "")
+        video = ET.SubElement(detail, "__video", {"url": url})
+        ET.SubElement(video, "ConnectionEntry", {
+            "networkTimeout": "12000", "uid": uid, "path": path,
+            "protocol": parts.scheme, "bufferTime": "-1",
+            "address": parts.hostname or "", "port": str(parts.port or -1),
+            "roverPort": "-1", "rtspReliable": "0", "ignoreEmbeddedKLV": "false",
+            "alias": callsign})
+    if azimuth is not None:
+        # No hideFov attribute: ATAK hides the cone when it is present at all
+        ET.SubElement(detail, "sensor", {
+            "fov": f"{ws.fov:g}", "vfov": "40", "azimuth": f"{azimuth:.0f}",
+            "range": f"{ws.range_m:g}", "fovAlpha": "0.3", "fovRed": "0.2",
+            "fovGreen": "0.6", "fovBlue": "1", "strokeColor": "-16776961",
+            "strokeWeight": "0.5", "displayMagneticReference": "0", "rangeLines": "100",
+            "model": "Digitraffic weather camera"})
+    ET.SubElement(detail, "remarks").text = camera_remarks(station, camera)
     return ET.tostring(root)
 
 
 def build_cot_files(fc: Dict[str, Any], ws: WeathercamSettings, mission_name: str,
-                    attachments: Optional[Mapping[str, str]] = None) -> Dict[str, bytes | str]:
-    """Mission items keyed by UID. attachments: station id -> file hash."""
+                    directions: Optional[StationDirections] = None) -> Dict[str, bytes | str]:
+    """Mission items keyed by UID, one per camera direction."""
+    directions = directions or StationDirections()
     files: Dict[str, bytes | str] = {}
     stations = extract_stations(fc, ws)
+    cones = 0
     for station in stations:
-        files[f"digitraffic.weathercam.{station['id']}"] = station_cot(
-            station, ws, mission_name, attachment=(attachments or {}).get(station["id"]))
+        for camera in directions.cameras(station):
+            files[UID_PREFIX + str(camera["id"])] = camera_cot(station, camera, ws, mission_name)
+            cones += camera["azimuth"] is not None
     features = len(fc.get("features", []) or [])
-    LOG.info("%s: %d of %d stations, %d cameras", mission_name, len(stations), features,
-             sum(len(s["presets"]) for s in stations))
+    LOG.info("%s: %d of %d stations, %d cameras, %d with a view cone", mission_name,
+             len(stations), features, len(files), cones)
     if features and not stations:
         LOG.warning("%s: no station has usable presets; check the property names", mission_name)
+    if not ws.stream_url:
+        LOG.warning("%s: WEATHERCAMS_STREAM_URL not set, the markers have no video",
+                    mission_name)
     return files
-
-
-def _get_image(url: str, headers: Mapping[str, str], timeout: float = 30.0
-               ) -> Tuple[int, str, bytes]:
-    """GET an image: (status, ETag, body); 304 when If-None-Match matches."""
-    req = urllib.request.Request(url, headers=dict(headers))
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
-            return resp.status, resp.headers.get("ETag", ""), resp.read()
-    except urllib.error.HTTPError as exc:
-        if exc.code == 304:
-            return 304, exc.headers.get("ETag", "") if exc.headers else "", b""
-        raise
-
-
-class ThumbnailCache:
-    """Latest thumbnail of each selected station, refreshed with ETags."""
-
-    def __init__(self, get: Any = _get_image, sleep: Any = asyncio.sleep) -> None:
-        self._get, self._sleep = get, sleep
-        self.images: Dict[str, bytes] = {}  # station id -> JPEG
-        self._etags: Dict[str, str] = {}
-
-    def selected(self, fc: Dict[str, Any], ws: WeathercamSettings) -> List[Dict[str, Any]]:
-        """Stations that get a thumbnail."""
-        if ws.image_bbox is None:
-            return []
-        stations = [s for s in extract_stations(fc, ws)
-                    if _in_bbox(s["lat"], s["lon"], ws.image_bbox)]
-        if len(stations) > ws.image_max:
-            LOG.warning("%d stations in WEATHERCAMS_IMAGE_BBOX, using the first %d "
-                        "(WEATHERCAMS_IMAGE_MAX)", len(stations), ws.image_max)
-        return stations[:ws.image_max]
-
-    def prune(self, wanted: List[str]) -> None:
-        """Forget stations that no longer get a thumbnail."""
-        for sid in set(self.images) - set(wanted):
-            self.images.pop(sid, None)
-            self._etags.pop(sid, None)
-
-    async def refresh(self, stations: List[Dict[str, Any]], ws: WeathercamSettings,
-                      headers: Mapping[str, str]) -> Tuple[Dict[str, bytes], int]:
-        """Fetch changed thumbnails (first camera of each station), at most
-        one request per image_request_gap seconds. Returns the latest image
-        of each of these stations and how many were new."""
-        fetched = 0
-        for i, station in enumerate(stations):
-            if i:
-                await self._sleep(ws.image_request_gap)
-            url = IMAGE_URL.format(preset=station["presets"][0]["id"]) + "?thumbnail=true"
-            hdrs = dict(headers)
-            if station["id"] in self._etags:
-                hdrs["If-None-Match"] = self._etags[station["id"]]
-            try:
-                status, etag, body = await asyncio.to_thread(self._get, url, hdrs)
-            except Exception as exc:  # noqa: BLE001  pylint: disable=broad-exception-caught
-                LOG.warning("thumbnail %s: %s", url, exc)
-                continue
-            if status == 200 and body:
-                self.images[station["id"]] = body
-                if etag:
-                    self._etags[station["id"]] = etag
-                fetched += 1
-        return {s["id"]: self.images[s["id"]] for s in stations if s["id"] in self.images}, fetched
-
-
-def file_name(station_id: str) -> str:
-    """Mission file name of a station's thumbnail (the same every round)."""
-    return f"{FILE_PREFIX}{station_id}.jpg"
-
-
-def _json(body: Any) -> Any:
-    if isinstance(body, (bytes, str)):
-        try:
-            return json.loads(body)
-        except ValueError:
-            return None
-    return body
-
-
-def mission_files(mission: Mapping[str, Any]) -> Dict[str, str]:
-    """hash -> name of this feeder's thumbnails in a mission (get_mission data)."""
-    files: Dict[str, str] = {}
-    for content in mission.get("contents", []) or []:
-        data = content.get("data", content) if isinstance(content, dict) else {}
-        name = str(data.get("name") or data.get("filename") or "")
-        digest = data.get("hash")
-        if digest and name.startswith(FILE_PREFIX):
-            files[str(digest)] = name
-    return files
-
-
-def marker_attachments(mission: Mapping[str, Any]) -> Dict[str, str]:
-    """station id -> hash of the thumbnail its marker shows (get_mission data)."""
-    prefix = "digitraffic.weathercam."
-    out: Dict[str, str] = {}
-    for item in mission.get("uids", []) or []:
-        if not isinstance(item, dict) or not str(item.get("data", "")).startswith(prefix):
-            continue
-        attachments = (item.get("details") or {}).get("attachments") or []
-        if attachments:
-            out[str(item["data"])[len(prefix):]] = str(attachments[0]).lower()
-    return out
-
-
-class AttachmentSync:
-    """Keeps one thumbnail file per station in the mission: uploads new
-    pictures, adds them to the mission and removes the replaced ones."""
-
-    def __init__(self, server: Any, mission_name: str, creator_uid: str) -> None:
-        self.server, self.mission_name, self.creator_uid = server, mission_name, creator_uid
-
-    async def _request(self, method: str, path: str, token: str = "", **kwargs: Any
-                       ) -> Tuple[int, Any]:
-        headers = dict(kwargs.pop("headers", {}) or {})
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-        return await self.server.connection.request(
-            method, self.server.api_base_url + path, headers=headers, **kwargs)
-
-    async def upload(self, images: Mapping[str, bytes], present: Dict[str, str],
-                     token: str) -> Dict[str, str]:
-        """Upload the pictures the mission does not have yet (present: hash ->
-        name of the mission's thumbnails, updated here). Returns station id ->
-        hash for the pictures that are in the mission."""
-        hashes: Dict[str, str] = {}
-        new: Dict[str, str] = {}  # hash -> station id
-        for sid, body in images.items():
-            digest = hashlib.sha256(body).hexdigest()
-            if digest not in present and digest not in new:
-                query = urllib.parse.urlencode({"name": file_name(sid),
-                                                "creatorUid": self.creator_uid})
-                status, result = await self._request(
-                    "post", f"/Marti/sync/upload?{query}",
-                    headers={"Content-Type": "image/jpeg"}, data=body)
-                if status != 200:
-                    LOG.warning("%s: upload of %s failed: HTTP %s %s", self.mission_name,
-                                file_name(sid), status, str(result)[:200])
-                    continue
-                meta = _json(result)
-                stored = str(meta.get("Hash") or "") if isinstance(meta, dict) else ""
-                if stored and stored.lower() != digest:
-                    LOG.warning("%s: server hash %s differs from %s for %s",
-                                self.mission_name, stored, digest, file_name(sid))
-                    digest = stored.lower()
-                new[digest] = sid
-            hashes[sid] = digest
-        if new:
-            status, result = await self._request(
-                "put", f"/Marti/api/missions/{urllib.parse.quote(self.mission_name)}/contents"
-                f"?{urllib.parse.urlencode({'creatorUid': self.creator_uid})}",
-                token=token, json={"hashes": sorted(new)})
-            if status != 200:
-                LOG.warning("%s: adding %d files failed: HTTP %s %s", self.mission_name,
-                            len(new), status, str(result)[:200])
-                for digest, sid in new.items():
-                    hashes.pop(sid, None)
-            else:
-                present.update({digest: file_name(sid) for digest, sid in new.items()})
-        return hashes
-
-    async def remove(self, digests: List[str], token: str, delete_files: bool,
-                     parallel: int = 1) -> List[str]:
-        """Remove replaced thumbnails from the mission (and the file store),
-        `parallel` at a time. Returns the hashes that left the mission."""
-        limit = asyncio.Semaphore(max(1, parallel))
-
-        async def one(digest: str) -> bool:
-            async with limit:
-                query = urllib.parse.urlencode({"hash": digest, "creatorUid": self.creator_uid})
-                status, result = await self._request(
-                    "delete",
-                    f"/Marti/api/missions/{urllib.parse.quote(self.mission_name)}/contents?{query}",
-                    token=token)
-                if status != 200:
-                    LOG.warning("%s: removing file %s failed: HTTP %s %s", self.mission_name,
-                                digest, status, str(result)[:200])
-                    return False
-                if delete_files:
-                    status, result = await self._request(
-                        "delete", f"/Marti/sync/delete?{urllib.parse.urlencode({'Hash': digest})}")
-                    if status != 200:
-                        LOG.debug("%s: deleting stored file %s: HTTP %s %s", self.mission_name,
-                                  digest, status, str(result)[:200])
-                return True
-
-        done = await asyncio.gather(*(one(digest) for digest in digests))
-        return [digest for digest, ok in zip(digests, done) if ok]

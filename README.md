@@ -24,7 +24,7 @@ by Stefan Gofferje.
 | `roadworks` | road works with work types and restrictions | `TrafficFinRoadworks` | `Roadwork` |
 | `weight-restrictions` | weight limits (e.g. bridges) | `TrafficFinWeightRestrictions` | `Weight limit` |
 | `exempted-transports` | oversize transports | `TrafficFinExemptedTransports` | `Exempted transport` |
-| `weathercams` | weather cameras, links to the latest images | `WeatherCamsFin` | `CAM <station>` |
+| `weathercams` | weather cameras: one marker per camera direction with video and view cone | `WeatherCamsFin` | `CAM <station> <direction>` |
 
 ### Groups
 
@@ -44,42 +44,44 @@ member of `TRAFFIC` sees all three missions. The groups apply when a mission
 is created. For an existing mission change them in the TAK admin UI, or
 delete the mission so the feeder recreates it.
 
-### Weather cameras (draft)
+### Weather cameras
 
-`weathercams` puts one marker per Digitraffic weather camera station in its
-own mission, so it can have its own group, for example
-`WEATHERCAMS_MISSION_GROUP=WEATHERCAM` (a comma-separated list shows the
-cameras to several groups without nested groups). The remarks list each camera
-direction with a link to its latest image
-(`https://weathercam.digitraffic.fi/<presetId>.jpg`); the link always
-serves the newest picture (updated about every 10 minutes); opening a link
-needs internet access on the device. Stations in `WEATHERCAMS_IMAGE_BBOX`
-also carry a thumbnail through the TAK server (below).
+`weathercams` puts one sensor marker (`b-m-p-s-p-loc`, camcorder icon) per
+Digitraffic weather camera direction in its own mission, so it can have its
+own group, for example `WEATHERCAMS_MISSION_GROUP=WEATHERCAM` (a
+comma-separated list shows the cameras to several groups without nested
+groups). Only stations and directions in collection are sent. UID
+`digitraffic.weathercam.<presetId>`, tags `#weather #weathercam`.
 
-Only stations and directions in collection are sent. The station list is
-fetched every `WEATHERCAMS_UPDATE_INTERVAL` seconds, and the mission changes
-only when stations come or go. UID `digitraffic.weathercam.<stationId>`,
-tags `#weather #weathercam`.
+- **Video:** with `WEATHERCAMS_STREAM_URL` (e.g. `rtmps://tak.example:1936/wc`)
+  the marker opens `<url>/<presetId>?user=…&pass=…` in ATAK's video player.
+  The stream server fetches the camera's latest image when someone opens it;
+  [docker-tak-feeder-compose](https://github.com/Street3r/docker-tak-feeder-compose)
+  runs MediaMTX for this. No images go through TAK. Everyone who sees the
+  markers sees the stream account (`WEATHERCAMS_STREAM_USER/PASSWORD`).
+- **View cone:** a camera's `direction` tells whether it looks towards
+  growing road addresses (`INCREASING_DIRECTION`) or the other way
+  (`DECREASING_DIRECTION`); checked on roads that start in Helsinki, where
+  "Helsinkiin" cameras are decreasing. The road's bearing at the station
+  comes from two points of the station's road address 50 m apart, converted
+  to coordinates by the Finnish Transport Infrastructure Agency's
+  [Viitekehysmuunnin](https://avoinapi.vaylapilvi.fi/viitekehysmuunnin/)
+  (one batch request). The marker gets `<sensor azimuth fov range>` and is
+  moved `WEATHERCAMS_OFFSET` metres that way, so a station's directions do
+  not lie on top of each other. Cameras on a crossing road, road-surface
+  cameras and unknown directions get no cone and stay at the station.
+  Digitraffic's direction codes are not always right, so some cones may
+  point the wrong way.
+- Station details (camera names, directions, road address) are fetched once
+  per station, one request every 0.2 s, and again after
+  `WEATHERCAMS_DETAILS_REFRESH_HOURS`. The station list is read every
+  `WEATHERCAMS_UPDATE_INTERVAL` seconds; the mission changes only when
+  something a user sees changes.
 
-Markers use CoT type `b-i-x-i` (Quick Pic), so ATAK shows the attached
-thumbnail on the marker; a sensor point (`b-m-p-s-p-loc`) did not show it.
-Stations inside `WEATHERCAMS_IMAGE_BBOX` also get the thumbnail of their
-first camera as a mission file, `weathercam_<stationId>.jpg`, linked to the
-marker with `<attachment_list hashes='["<sha256>"]'/>` so ATAK lists it
-under the marker's attachments. Thumbnails are fetched with ETags, at most
-one request per 1.1 s (Digitraffic allows 60 image requests a minute). A new
-picture is uploaded to the server's file store, added to the mission and the
-marker re-sent with its hash; the station's previous file is then removed
-from the mission (and from the file store, `WEATHERCAMS_DELETE_OLD_FILES`).
-Only files named `weathercam_*` are touched. An unchanged picture sends
-nothing. The pictures go out in batches of `WEATHERCAMS_IMAGE_BATCH`
-stations as they are fetched (50 stations take about a minute), so phones
-get a steady trickle of small mission changes instead of the whole round
-(about 800 new files, markers and removals) at once. Experimental: an earlier test embedded the picture in the CoT
-(`<image>`), which ATAK then offered to publish back to the mission.
-
-Tested on a TAK 5.8 test server: 812 stations, 2266 cameras. Not yet
-tested: opening the links in the remarks.
+Upgrading from the thumbnail version (markers per station, image files in
+the mission): delete the `WeatherCamsFin` mission in the TAK admin UI before
+starting this version, so the feeder recreates it without the old markers and
+files. The old files stay in the server's file store until removed there.
 
 ## What it sends
 
@@ -109,15 +111,14 @@ tested: opening the links in the remarks.
 | `ICONSET_PATH` | caution icon | Default icon |
 | `WEATHERCAMS_UPDATE_INTERVAL` | `600` | Seconds between weather camera syncs (`<DATASET>_UPDATE_INTERVAL` works for every dataset) |
 | `WEATHERCAMS_BBOX` | all of Finland | Area `west,south,east,north`, e.g. `22,60,26,62` |
-| `WEATHERCAMS_THUMBNAILS` | `0` | `1` = link the small images (`?thumbnail=true`) |
-| `WEATHERCAMS_IMAGE_BBOX` | none | Area `west,south,east,north` whose stations get their thumbnail as a mission file; empty = none (`WEATHERCAMS_EMBED_BBOX` also works) |
-| `WEATHERCAMS_IMAGE_MAX` | `100` | Most stations with a thumbnail (`WEATHERCAMS_EMBED_MAX` also works) |
-| `WEATHERCAMS_IMAGE_BATCH` | `50` | Stations per batch of thumbnails sent to the mission |
-| `WEATHERCAMS_DELETE_PARALLEL` | `5` | Replaced thumbnails removed from the mission at the same time |
-| `WEATHERCAMS_DELETE_OLD_FILES` | `1` | Also delete replaced thumbnails from the server's file store |
-| `WEATHERCAMS_COT_TYPE` | `b-i-x-i` | CoT type of the camera markers |
+| `WEATHERCAMS_STREAM_URL` | none | Video stream base URL, the preset id is appended; empty = no video |
+| `WEATHERCAMS_STREAM_USER` / `WEATHERCAMS_STREAM_PASSWORD` | none | Stream account, added as `?user=&pass=` |
+| `WEATHERCAMS_FOV` / `WEATHERCAMS_RANGE` | `60` / `250` | View cone angle (degrees) and length (m) |
+| `WEATHERCAMS_OFFSET` | `20` | Metres a marker is moved in its view direction; `0` = at the station |
+| `WEATHERCAMS_DETAILS_REFRESH_HOURS` | `24` | How often station details and road bearings are fetched again |
+| `WEATHERCAMS_COT_TYPE` | `b-m-p-s-p-loc` | CoT type of the camera markers |
 | `WEATHERCAMS_ICON` | none | Optional ATAK iconset path instead of the type's icon |
-| `WEATHERCAMS_STALE_DAYS` | `365` | Stale time; removal from the mission hides a station |
+| `WEATHERCAMS_STALE_DAYS` | `365` | Stale time; removal from the mission hides a camera |
 | `TIMEZONE` | `Europe/Helsinki` | Time zone of the validity times in the remarks |
 | `UPDATE_INTERVAL` | `60` | Seconds between syncs of one dataset |
 | `RETRY_INTERVAL` | `300` | Wait after a failed sync |
@@ -143,7 +144,8 @@ The container runs as uid 10001; the key must be readable by it.
 ## Data
 
 Fintraffic / digitraffic.fi, [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
-The source line is in every item's remarks.
+The source line is in every item's remarks. Road bearings of the weather
+cameras: Väylävirasto, Viitekehysmuunnin (CC BY 4.0).
 
 ## Credits and changes
 
@@ -181,6 +183,10 @@ Changes in this fork (Street3r):
     to the marker, the previous file removed when a new one arrives;
     thumbnails sent in batches of 50 stations as they are fetched, replaced
     ones removed 5 at a time.
+- 2026-10-20
+  - `weathercams`: one sensor marker per camera direction with an on-demand
+    video stream (`WEATHERCAMS_STREAM_URL`) and a view cone from the road
+    bearing; thumbnails and mission files removed.
 
 - 2026-10-15
   - Draft: Digitraffic weather cameras as the `weathercams` dataset in their

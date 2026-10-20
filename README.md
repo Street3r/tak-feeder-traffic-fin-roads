@@ -1,9 +1,8 @@
 # tak-feeder-traffic-fin-roads
 
-> [!WARNING]
-> **Work in progress. Not recommended for use.** This fork is being improved
-> and has not been tested against a live TAK server yet. Things may change or
-> break without notice.
+> [!NOTE]
+> Tested with live data and TAK Server 5.8 (October 2026).
+> Settings and CoT details may still change.
 
 TAK feeder for Finnish road traffic messages from Fintraffic's Digitraffic
 Simple JSON (GeoJSON) API. Each dataset is kept in sync with its own TAK

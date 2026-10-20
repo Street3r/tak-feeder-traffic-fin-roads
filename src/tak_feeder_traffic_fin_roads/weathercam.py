@@ -407,7 +407,8 @@ def camera_cot(station: Dict[str, Any], camera: Dict[str, Any], ws: WeathercamSe
         url = stream_url(ws, preset_id)
         parts = urllib.parse.urlsplit(url)
         path = parts.path + (f"?{parts.query}" if parts.query else "")
-        video = ET.SubElement(detail, "__video", {"url": url})
+        # uid as ATAK writes it itself: links the marker to its video alias
+        video = ET.SubElement(detail, "__video", {"uid": uid, "url": url})
         ET.SubElement(video, "ConnectionEntry", {
             "networkTimeout": "12000", "uid": uid, "path": path,
             "protocol": parts.scheme, "bufferTime": "-1",

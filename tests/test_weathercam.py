@@ -192,6 +192,7 @@ class CotTest(unittest.TestCase):
                          ("rtmps", "tak.example", "1936",
                           "/wc/C102?user=kelikamera&pass=s3cret"))
         self.assertEqual(entry["uid"], "digitraffic.weathercam.C102")
+        self.assertEqual(video.get("uid"), entry["uid"])
 
     def test_without_stream_or_direction(self) -> None:
         ws = weathercam.WeathercamSettings()

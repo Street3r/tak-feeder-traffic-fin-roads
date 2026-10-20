@@ -171,6 +171,7 @@ def cot_signature(event: ET.Element) -> Tuple[Any, ...]:
         _points([tuple(l.get("point", ",").split(",", 1)) for l in links]),  # type: ignore[misc]
         _attachments(detail),
         attr("__video", "url"),
+        attr("__video", "uid"),
         tuple(attr("sensor", a) for a in ("azimuth", "fov", "range")),
     )
 
